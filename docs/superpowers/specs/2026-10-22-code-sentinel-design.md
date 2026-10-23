@@ -1,7 +1,7 @@
 # CodeSentinel 设计文档
 
 日期：2026-10-22
-状态：待评审
+状态：已批准
 
 ## 1. 意图与背景
 
@@ -103,7 +103,7 @@ diff 的获取方式同样只有一种靠谱做法：服务端保留裸镜像，
 
 - 后端：.NET 10、ASP.NET Core、EF Core、ASP.NET Core Identity（账号与密码哈希）、Serilog（结构化日志）。
 - 数据库：默认 SQLite；EF Core 提供程序可切换 PostgreSQL / SQL Server，第一版只验证 SQLite。
-- 前端：Vue 3 + Vite + TypeScript + Element Plus；diff 视图用 CodeMirror 6（自带虚拟滚动和 diff 能力），语法高亮用 Shiki。
+- 前端：Vue 3 + Vite + TypeScript + Element Plus + Pinia。diff 由后端解析成结构化的“文件 → hunk → 行”，前端按行渲染，用 Shiki 做语法高亮；不用 CodeMirror，行级评论的定位和测试都更稳。
 - git：调用命令行 `git`（不引入 LibGit2Sharp）。服务启动时检测 `git --version`。
 - 测试：后端 xUnit + 可丢弃的临时裸仓库做集成测试；前端 Vitest（组件）+ Playwright（关键流程）。
 
@@ -161,6 +161,7 @@ diff 的获取方式同样只有一种靠谱做法：服务端保留裸镜像，
 | head_sha | 本版本评审的 B 的提交 |
 | approved_at / merged_at / closed_at | 时间戳 |
 | merge_commit_sha | 检测到的合并结果（A 上的提交） |
+| merge_hint / merge_hint_count | 连续未检测到合并的同步次数，用于 squash 提示 |
 | close_reason | 关闭原因 |
 
 同一 `(repo_id, head_branch)` 同时只允许一个活跃评审单（status 不是 MERGED/CLOSED）。重复提交返回已有单号。
@@ -182,7 +183,7 @@ diff 的获取方式同样只有一种靠谱做法：服务端保留裸镜像，
 | 字段 | 说明 |
 |---|---|
 | review_id, user_id | 联合唯一 |
-| state | PENDING / APPROVED / CHANGES_REQUESTED（新版本出现后全部回到 PENDING） |
+| state | PENDING / APPROVED / CHANGES_REQUESTED / REMOVED（新版本出现后除 REMOVED 外全部回到 PENDING） |
 | state_revision_id | 结论对应的版本，正常情况下等于 current_revision_id |
 | note | 结论附言 |
 
@@ -209,8 +210,19 @@ diff 的获取方式同样只有一种靠谱做法：服务端保留裸镜像，
 | blob_sha | 该侧文件内容的 blob id |
 | body | 内容（Markdown 子集） |
 | parent_id | 回复某条评论 |
-| status | OPEN / RESOLVED / OUTDATED |
+| status | OPEN / RESOLVED / OUTDATED / DELETED |
 | resolved_by / resolved_at | |
+
+### review_file_views
+逐文件的“已看过”标记，只属于个人，不参与通过判定。
+
+| 字段 | 说明 |
+|---|---|
+| review_id / user_id / file_path | 联合唯一 |
+| blob_sha | 勾选时该文件新侧的 blob |
+| viewed_at | |
+
+读取时比较 `blob_sha` 与当前版本该文件的 blob：一致才算“已看过”，文件变了自动视为未看过。旧记录保留，内容改回原样也不会恢复勾选（以 blob 比对为准）。
 
 ### notifications
 | 字段 | 说明 |
@@ -250,7 +262,7 @@ actor_id、action、target_type、target_id、detail_json、created_at。记录�
 
 - **提交评审**是唯一创建评审单的入口，推送不创建。
 - 创建时锁定 `base_sha`（A 当时的 head）和 `head_sha`（B 当时的 head），生成 `revision 1`。
-- **新版本的唯一触发是 B 的 head SHA 变化**：新提交、amend、rebase、把 A 合进 B，一律生成新版本，并把所有审核人重置为 `PENDING`。不比较 diff 是否相同，旧结论留在 `review_decisions`。
+- **新版本的唯一触发是 B 的 head SHA 变化**：新提交、amend、rebase、把 A 合进 B，一律生成新版本，并把所有未移除的审核人重置为 `PENDING`。不比较 diff 是否相同，旧结论留在 `review_decisions`。
 - **A 前进不生成新版本、不重置结论**：只是重新计算合并可行性，冲突风险在界面上提示。
 - 任一审核人要求修改 → `CHANGES_REQUESTED`；该状态下新提交直接回到 `OPEN`。
 - 只有被挑中的审核人能给出结论；提交人不能作为自己评审单的审核人。
@@ -338,6 +350,7 @@ actor_id、action、target_type、target_id、detail_json、created_at。记录�
 - `GET /reviews/{id}/files`
 - `GET /reviews/{id}/diff?path=`
 - `GET /reviews/{id}/blob?path=&side=`（展开全文）
+- `PUT /reviews/{id}/files/viewed`（body: path, viewed；勾选/取消“已看过”）
 - `POST /reviews/{id}/comments`、`PATCH /comments/{id}`、`DELETE /comments/{id}`
 - `POST /comments/{id}/resolve`、`POST /comments/{id}/unresolve`
 
@@ -361,6 +374,7 @@ actor_id、action、target_type、target_id、detail_json、created_at。记录�
 4. **评审详情**：
    - 顶部：状态、提交人、审核人及各自结论、base/head、版本切换、刷新
    - 变更文件列表 + 行级 diff + 行评论（支持回复、解决、折叠）
+   - 每个文件一个“已看过”勾选，顶部显示“已看过 3/5”；文件内容没变时勾选跨版本保留
    - 右侧操作：通过 / 要求修改（带附言）、关闭、标记已合并
    - 通过后显示“合并指引”：合并哪两个分支、当前 head sha、合并在 Gitblit 完成
 5. **仓库管理**（管理员）：仓库增删改、连通性测试、同步状态、成员与合并人
@@ -385,6 +399,7 @@ actor_id、action、target_type、target_id、detail_json、created_at。记录�
 14. **停用用户或被移出仓库的审核人**：自动从所有未结束评审的审核人名单中移除，界面标注“已移除”，不计入通过条件，并通知提交人补人。
 15. **每个仓库至少一个合并人**：创建和保存仓库成员时校验，不允许移除最后一个合并人；通知兜底同时发给系统管理员。
 16. **git 传输**：生产与测试均为纯 HTTP，只做 http/https，不做 SSH、不做自定义 CA 或跳过校验的开关。
+17. **逐文件“已看过”是个人标记**：只影响自己的浏览进度，不影响通过判定；比对 blob 判断是否失效。第一版不做“只看我上次之后的变化”那种按人增量 diff。
 
 ## 20. 留给构建者
 
@@ -437,6 +452,7 @@ actor_id、action、target_type、target_id、detail_json、created_at。记录�
 12. 管理员移除一名审核人 → 被移除者的结论不再计入；尝试移除到空被拒绝。
 13. 停用一个待评审的审核人 → 自动从名单移除并通知提交人补人。
 14. 仓库成员配置里没有合并人 → 保存被拒绝。
+15. 审核人勾选 3 个文件“已看过”后，B 再提交：没变的文件保持勾选，变了的自动取消，顶部进度随当前版本重算。
 
 ## 25. 后续（不在本期）
 
