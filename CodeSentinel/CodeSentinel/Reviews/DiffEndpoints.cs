@@ -31,11 +31,12 @@ public static class DiffEndpoints
     }
 
     /// <summary>
-    /// 读取版本文件列表，超过 300 条时截断并标记 Truncated。
+    /// 读取版本文件列表，超过 300 条时截断并标记 Truncated，同时回填当前用户的已看过状态。
     /// </summary>
     /// <param name="id">评审单主键</param>
     /// <param name="db">数据库上下文</param>
     /// <param name="diffService">diff 引擎</param>
+    /// <param name="mirrorService">镜像服务，用于解析删除文件的合并基</param>
     /// <param name="httpContext">HTTP 上下文</param>
     /// <param name="ct">取消令牌</param>
     /// <returns>文件列表响应</returns>
@@ -43,19 +44,26 @@ public static class DiffEndpoints
         Guid id,
         AppDbContext db,
         DiffService diffService,
+        MirrorService mirrorService,
         HttpContext httpContext,
         CancellationToken ct)
     {
         var userId = CurrentUser.RequireId(httpContext);
         var review = await ReviewAccess.LoadForMemberAsync(db, id, userId, ct);
+        var revision = await ViewedEndpoints.LoadCurrentRevisionAsync(db, review, ct);
 
         var files = await diffService.GetFilesAsync(
-            review.RepoId, review.BaseSha, review.HeadSha, ct);
+            review.RepoId, revision.BaseSha, revision.HeadSha, ct);
+        var viewedPaths = await ViewedEndpoints.ResolveViewedPathsAsync(
+            db, diffService, mirrorService, review.RepoId, revision, userId, files, ct);
         var total = files.Count;
-        var items = files.Take(MaxFiles).ToList();
+        var items = files
+            .Take(MaxFiles)
+            .Select(m => new DiffFileListItem(m, viewedPaths.Contains(m.Path)))
+            .ToList();
 
         return Results.Ok(new DiffFileListResponse(
-            items, total, 0, total, total > MaxFiles));
+            items, total, viewedPaths.Count, total, total > MaxFiles));
     }
 
     /// <summary>
@@ -170,12 +178,52 @@ public static class DiffEndpoints
 /// </summary>
 /// <param name="Items">文件摘要列表（截断后）</param>
 /// <param name="Total">真实文件总数</param>
-/// <param name="ViewedCount">已查看文件数，Task 12 前占位为 0</param>
-/// <param name="FileCount">文件总数，Task 12 前与 Total 一致</param>
+/// <param name="ViewedCount">当前用户在当前版本已看过的文件数</param>
+/// <param name="FileCount">当前版本文件总数</param>
 /// <param name="Truncated">是否因超过上限被截断</param>
 public sealed record DiffFileListResponse(
-    IReadOnlyList<DiffFileSummary> Items,
+    IReadOnlyList<DiffFileListItem> Items,
     int Total,
     int ViewedCount,
     int FileCount,
     bool Truncated);
+
+/// <summary>
+/// 文件列表项：文件摘要加上当前用户的已看过状态。
+/// </summary>
+/// <param name="Path">当前路径（重命名后为新路径）</param>
+/// <param name="OldPath">重命名前的路径，非重命名时为 null</param>
+/// <param name="Status">变更类型</param>
+/// <param name="Additions">新增行数</param>
+/// <param name="Deletions">删除行数</param>
+/// <param name="IsBinary">是否为二进制文件</param>
+/// <param name="IsTooLarge">是否超过单文件 diff 大小限制</param>
+/// <param name="Viewed">当前用户是否已看过</param>
+public sealed record DiffFileListItem(
+    string Path,
+    string? OldPath,
+    FileChangeStatus Status,
+    int Additions,
+    int Deletions,
+    bool IsBinary,
+    bool IsTooLarge,
+    bool Viewed)
+{
+    /// <summary>
+    /// 用文件摘要与已看过状态构造列表项。
+    /// </summary>
+    /// <param name="summary">文件摘要</param>
+    /// <param name="viewed">当前用户是否已看过</param>
+    public DiffFileListItem(DiffFileSummary summary, bool viewed)
+        : this(
+            summary.Path,
+            summary.OldPath,
+            summary.Status,
+            summary.Additions,
+            summary.Deletions,
+            summary.IsBinary,
+            summary.IsTooLarge,
+            viewed)
+    {
+    }
+}

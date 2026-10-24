@@ -234,6 +234,56 @@ public sealed class DiffService
     }
 
     /// <summary>
+    /// 一次读取某个提交下全部文件的 blob id 映射，避免逐个文件执行 git。
+    /// </summary>
+    /// <param name="repoId">仓库主键</param>
+    /// <param name="commitSha">提交 SHA</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>文件路径到 blob id 的映射</returns>
+    public async Task<IReadOnlyDictionary<string, string>> GetBlobShaMapAsync(
+        Guid repoId,
+        string commitSha,
+        CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(commitSha);
+
+        var mirrorPath = _mirror.GetMirrorPath(repoId);
+        var result = await _git.RunAsync(
+            mirrorPath, ["ls-tree", "-r", "-z", "--full-tree", commitSha], null, ct);
+        EnsureSucceeded(result.ExitCode, result.StdErr, "读取文件 blob id 失败");
+
+        return ParseBlobShaMap(result.StdOut);
+    }
+
+    /// <summary>
+    /// 解析 ls-tree -z 输出：每项为“模式 类型 blobid\t路径”。
+    /// </summary>
+    /// <param name="stdOut">git 输出</param>
+    /// <returns>文件路径到 blob id 的映射</returns>
+    private static IReadOnlyDictionary<string, string> ParseBlobShaMap(string stdOut)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var entry in stdOut.Split('\0'))
+        {
+            var tabIndex = entry.IndexOf('\t');
+            if (tabIndex <= 0)
+            {
+                continue;
+            }
+
+            var meta = entry[..tabIndex].Split(' ');
+            if (meta.Length < 3)
+            {
+                continue;
+            }
+
+            map[entry[(tabIndex + 1)..]] = meta[2];
+        }
+
+        return map;
+    }
+
+    /// <summary>
     /// 校验路径属于该版本 diff 的文件列表，否则返回 404 FILE_NOT_IN_DIFF。
     /// </summary>
     /// <param name="repoId">仓库主键</param>

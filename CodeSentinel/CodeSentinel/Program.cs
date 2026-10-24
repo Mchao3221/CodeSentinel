@@ -164,6 +164,7 @@ api.MapBranchEndpoints();
 api.MapReviewsEndpoints();
 api.MapCommentsEndpoints();
 api.MapDiffEndpoints();
+api.MapViewedEndpoints();
 api.MapSyncEndpoints();
 
 app.Run();
