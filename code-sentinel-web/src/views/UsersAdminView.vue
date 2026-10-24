@@ -260,6 +260,7 @@ async function resetPassword(user: AdminUser): Promise<void> {
   }
 
   updatingId.value = user.id;
+  oneTimePassword.value = '';
   try {
     const result = await resetUserPassword(user.id);
     oneTimePassword.value = result.password;
@@ -273,15 +274,34 @@ async function resetPassword(user: AdminUser): Promise<void> {
 }
 
 /**
- * 复制一次性密码到剪贴板。
+ * 复制一次性密码到剪贴板；密码已清空时不做任何事。
  */
 async function copyPassword(): Promise<void> {
+  if (oneTimePassword.value === '') {
+    return;
+  }
+
   try {
     await navigator.clipboard.writeText(oneTimePassword.value);
     ElMessage.success('密码已复制');
   } catch {
     ElMessage.error('复制失败，请手动选择密码复制');
   }
+}
+
+/**
+ * 关闭密码弹窗时清除一次性密码，避免残留旧值被复制。
+ */
+function clearOneTimePassword(): void {
+  oneTimePassword.value = '';
+}
+
+/**
+ * 关闭密码弹窗并立即清空密码，保证关闭后不可再复制。
+ */
+function closePasswordDialog(): void {
+  passwordVisible.value = false;
+  clearOneTimePassword();
 }
 
 // 页码变化时加载对应页
@@ -469,15 +489,26 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="passwordVisible" title="一次性密码" width="460px" class="password-dialog">
+    <el-dialog
+      v-model="passwordVisible"
+      title="一次性密码"
+      width="460px"
+      class="password-dialog"
+      @close="clearOneTimePassword"
+      @closed="clearOneTimePassword"
+    >
       <p class="password-warning">
         该密码仅显示一次，请立即转告用户并妥善保存；用户首次登录后必须修改密码。
       </p>
       <div class="password-value">{{ oneTimePassword }}</div>
 
       <template #footer>
-        <el-button @click="copyPassword">复制密码</el-button>
-        <el-button type="primary" @click="passwordVisible = false">关闭</el-button>
+        <el-button class="password-copy" :disabled="oneTimePassword === ''" @click="copyPassword">
+          复制密码
+        </el-button>
+        <el-button type="primary" class="password-close" @click="closePasswordDialog">
+          关闭
+        </el-button>
       </template>
     </el-dialog>
   </section>

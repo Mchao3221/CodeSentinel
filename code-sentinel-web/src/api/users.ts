@@ -13,6 +13,9 @@ import type {
 /** 用户列表默认分页大小，与后端上限一致 */
 const DEFAULT_PAGE_SIZE = 20;
 
+/** 拉取全量用户时使用的分页大小 */
+const BULK_PAGE_SIZE = 100;
+
 /**
  * 分页获取用户，按更新时间倒序。
  * @param page 页码，从 1 开始
@@ -27,6 +30,23 @@ export async function fetchUsers(
     params: { page, pageSize },
   });
   return data;
+}
+
+/**
+ * 按 total 翻页拉取全部用户，供需要完整候选集的弹窗使用。
+ * @returns 全量用户列表
+ */
+export async function fetchAllUsers(): Promise<AdminUser[]> {
+  const firstPage = await fetchUsers(1, BULK_PAGE_SIZE);
+  const items = [...firstPage.items];
+  const pageCount = Math.ceil(firstPage.total / BULK_PAGE_SIZE);
+
+  for (let page = 2; page <= pageCount; page += 1) {
+    const result = await fetchUsers(page, BULK_PAGE_SIZE);
+    items.push(...result.items);
+  }
+
+  return items;
 }
 
 /**

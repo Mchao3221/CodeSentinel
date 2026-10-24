@@ -17,6 +17,12 @@ const REPO_ID = '33333333-3333-4333-8333-333333333333';
 /** 可分配为仓库成员的用户主键 */
 const USER_ID = '44444444-4444-4444-8444-444444444444';
 
+/** 第二页用户主键，同时是既有成员 */
+const PAGE2_ID = '99999999-9999-4999-8999-999999999999';
+
+/** 已停用的既有成员主键 */
+const INACTIVE_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+
 /** 模拟响应 */
 interface MockResult {
   /** HTTP 状态码 */
@@ -50,10 +56,48 @@ function mockAdapter(handler: (config: InternalAxiosRequestConfig) => MockResult
   api.defaults.adapter = adapter;
 }
 
+/** 模拟用户 */
+interface UserStub {
+  /** 用户主键 */
+  id: string;
+  /** 登录名 */
+  username: string;
+  /** 显示名 */
+  displayName: string;
+  /** 是否启用 */
+  isActive: boolean;
+}
+
+/** 模拟成员 */
+interface MemberStub {
+  /** 用户主键 */
+  userId: string;
+  /** 登录名 */
+  username: string;
+  /** 显示名 */
+  displayName: string;
+  /** 是否合并人 */
+  isMerger: boolean;
+  /** 是否启用 */
+  isActive: boolean;
+}
+
+/** 默认用户 */
+const DEFAULT_USER: UserStub = {
+  id: USER_ID,
+  username: 'alice',
+  displayName: 'Alice',
+  isActive: true,
+};
+
 /** 仓库接口模拟选项 */
 interface RepoApiOptions {
   /** 连接测试前 N 次失败，之后成功 */
   connectionFailures?: number;
+  /** 用户列表，按分页切片返回 */
+  users?: UserStub[];
+  /** 仓库既有成员，含停用成员 */
+  members?: MemberStub[];
 }
 
 /** 仓库接口模拟结果 */
@@ -144,31 +188,32 @@ function mockRepoApis(options: RepoApiOptions = {}): RepoApiMocks {
     }
 
     if (url === '/api/users' && method === 'get') {
+      const params = (config.params ?? {}) as { page?: number; pageSize?: number };
+      const allUsers = options.users ?? [DEFAULT_USER];
+      const currentPage = params.page ?? 1;
+      const currentPageSize = params.pageSize ?? 100;
+      const start = (currentPage - 1) * currentPageSize;
+
       return {
         status: 200,
         data: {
-          items: [
-            {
-              id: USER_ID,
-              username: 'alice',
-              displayName: 'Alice',
-              email: null,
-              isAdmin: false,
-              isActive: true,
-              mustChangePassword: false,
-              createdAt: '2026-01-01T00:00:00Z',
-              updatedAt: '2026-01-01T00:00:00Z',
-            },
-          ],
-          total: 1,
-          page: 1,
-          pageSize: 100,
+          items: allUsers.slice(start, start + currentPageSize).map((user) => ({
+            ...user,
+            email: null,
+            isAdmin: false,
+            mustChangePassword: false,
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-01T00:00:00Z',
+          })),
+          total: allUsers.length,
+          page: currentPage,
+          pageSize: currentPageSize,
         },
       };
     }
 
     if (url === `/api/repos/${REPO_ID}/members` && method === 'get') {
-      return { status: 200, data: { items: [] } };
+      return { status: 200, data: { items: options.members ?? [] } };
     }
 
     if (url === `/api/repos/${REPO_ID}/members` && method === 'put') {
@@ -330,5 +375,59 @@ describe('仓库管理视图', () => {
     expect(mocks.memberPuts[0]).toEqual({
       members: [{ userId: USER_ID, isMerger: true }],
     });
+  });
+
+  it('分页加载全部用户，保存时保留第二页既有成员并排除停用成员', async () => {
+    const users: UserStub[] = Array.from({ length: 100 }, (_, index) => ({
+      id: `user-${index}`,
+      username: `user-${index}`,
+      displayName: `用户 ${index}`,
+      isActive: true,
+    }));
+    users.push({
+      id: PAGE2_ID,
+      username: 'page-two',
+      displayName: '第二页成员',
+      isActive: true,
+    });
+
+    const mocks = mockRepoApis({
+      users,
+      members: [
+        {
+          userId: PAGE2_ID,
+          username: 'page-two',
+          displayName: '第二页成员',
+          isMerger: true,
+          isActive: true,
+        },
+        {
+          userId: INACTIVE_ID,
+          username: 'ghost',
+          displayName: '停用成员',
+          isMerger: false,
+          isActive: false,
+        },
+      ],
+    });
+    const wrapper = mountView(createTestPinia(), createTestRouter());
+    await flushPromises();
+
+    await wrapper.find('.members-repo-button').trigger('click');
+    await flushPromises();
+
+    // 全量用户翻页加载完成，停用成员保留展示并标注
+    expect(checkboxesByClass(wrapper, 'member-select')).toHaveLength(101);
+    expect(wrapper.text()).toContain('已停用（保存后将移除）');
+    expect(wrapper.find('.members-save').attributes('disabled')).toBeUndefined();
+
+    await wrapper.find('.members-save').trigger('click');
+    await flushPromises();
+
+    const body = mocks.memberPuts[0] as {
+      members: { userId: string; isMerger: boolean }[];
+    };
+    expect(body.members).toEqual([{ userId: PAGE2_ID, isMerger: true }]);
+    expect(body.members.some((member) => member.userId === INACTIVE_ID)).toBe(false);
   });
 });

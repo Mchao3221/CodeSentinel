@@ -208,4 +208,32 @@ describe('用户管理视图', () => {
     expect(wrapper.find('.password-dialog').text()).toContain('TempPass123');
     expect(wrapper.find('.password-dialog').text()).toContain('仅显示一次');
   });
+
+  it('关闭一次性密码弹窗后清空密码并禁止复制', async () => {
+    mockUserApis();
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as unknown as MessageBoxData);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const wrapper = mountView(createTestPinia(), createTestRouter());
+    await flushPromises();
+
+    await wrapper.find('.reset-password-button').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.password-value').text()).toBe('TempPass123');
+
+    await wrapper.find('.password-close').trigger('click');
+    await flushPromises();
+
+    // 关闭后组件状态与 DOM 都不再保留旧密码
+    expect(wrapper.find('.password-value').text()).toBe('');
+    expect(wrapper.text()).not.toContain('TempPass123');
+
+    const copyButton = wrapper.find('.password-copy');
+    expect(copyButton.attributes('disabled')).toBeDefined();
+    await copyButton.trigger('click');
+    expect(writeText).not.toHaveBeenCalled();
+  });
 });

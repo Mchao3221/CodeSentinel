@@ -215,9 +215,27 @@ function mockDetailApis(
  */
 function buildMembers(): RepoMember[] {
   return [
-    { userId: SUBMITTER_ID, username: 'alice', displayName: 'Alice', isMerger: false },
-    { userId: REVIEWER_ID, username: 'bob', displayName: 'Bob', isMerger: false },
-    { userId: NEW_MEMBER_ID, username: 'dave', displayName: 'Dave', isMerger: false },
+    {
+      userId: SUBMITTER_ID,
+      username: 'alice',
+      displayName: 'Alice',
+      isMerger: false,
+      isActive: true,
+    },
+    {
+      userId: REVIEWER_ID,
+      username: 'bob',
+      displayName: 'Bob',
+      isMerger: false,
+      isActive: true,
+    },
+    {
+      userId: NEW_MEMBER_ID,
+      username: 'dave',
+      displayName: 'Dave',
+      isMerger: false,
+      isActive: true,
+    },
   ];
 }
 

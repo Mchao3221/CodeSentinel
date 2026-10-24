@@ -63,10 +63,16 @@ export async function fetchUnreviewedBranches(repoId: string): Promise<Unreviewe
 /**
  * 获取仓库成员，可用于选择审核人。
  * @param repoId 仓库主键
+ * @param options includeInactive 为 true 时管理员可同时读取已停用成员
  * @returns 成员列表
  */
-export async function fetchRepoMembers(repoId: string): Promise<RepoMember[]> {
-  const { data } = await api.get<{ items: RepoMember[] }>(`/api/repos/${repoId}/members`);
+export async function fetchRepoMembers(
+  repoId: string,
+  options: { includeInactive?: boolean } = {},
+): Promise<RepoMember[]> {
+  const { data } = await api.get<{ items: RepoMember[] }>(`/api/repos/${repoId}/members`, {
+    params: { includeInactive: options.includeInactive === true ? true : undefined },
+  });
   return data.items;
 }
 

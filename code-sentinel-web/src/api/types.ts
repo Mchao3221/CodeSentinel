@@ -329,6 +329,8 @@ export interface RepoMember {
   displayName: string;
   /** 是否合并人 */
   isMerger: boolean;
+  /** 用户是否启用 */
+  isActive: boolean;
 }
 
 /**

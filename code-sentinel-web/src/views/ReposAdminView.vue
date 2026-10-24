@@ -15,12 +15,14 @@ import {
   testRepoConnection,
   updateRepo,
 } from '../api/repos';
-import { fetchUsers } from '../api/users';
+import { fetchAllUsers } from '../api/users';
 import type {
   AdminUser,
   CreateRepoInput,
   Repo,
   RepoCredentialKind,
+  RepoMember,
+  RepoMemberInput,
   UpdateRepoInput,
 } from '../api/types';
 import { apiErrorMessage } from '../utils/apiError';
@@ -28,9 +30,6 @@ import { formatDateTime } from '../utils/datetime';
 
 /** 仓库列表每页条数 */
 const PAGE_SIZE = 20;
-
-/** 成员弹窗一次拉取的用户上限，与后端分页上限一致 */
-const MAX_USERS = 100;
 
 /** 同步间隔默认值（秒） */
 const DEFAULT_SYNC_INTERVAL = 300;
@@ -57,6 +56,20 @@ interface RepoForm {
   credentialKind: RepoCredentialKind;
   /** 同步间隔秒数 */
   syncIntervalSeconds: number;
+}
+
+/**
+ * 成员弹窗中的一行候选。
+ */
+interface MemberRow {
+  /** 用户主键 */
+  userId: string;
+  /** 登录名 */
+  username: string;
+  /** 显示名 */
+  displayName: string;
+  /** 是否为已停用的既有成员 */
+  isInactive: boolean;
 }
 
 /** 仓库列表 */
@@ -107,8 +120,10 @@ const membersLoading = ref(false);
 const memberSaving = ref(false);
 /** 成员弹窗对应的仓库 */
 const activeRepo = ref<Repo | null>(null);
-/** 可选用户 */
+/** 可选用户（仅启用中的用户作为候选人） */
 const users = ref<AdminUser[]>([]);
+/** 仓库既有成员（含已停用成员，用于标注保存后将移除） */
+const existingMembers = ref<RepoMember[]>([]);
 /** 每个用户是否被选为成员 */
 const memberSelected = reactive<Record<string, boolean>>({});
 /** 每个用户是否标记为合并人 */
@@ -122,11 +137,35 @@ const rules: FormRules<RepoForm> = {
   syncIntervalSeconds: [{ required: true, message: '请输入同步间隔', trigger: 'blur' }],
 };
 
-/** 已选成员主键 */
+/** 成员候选行：启用用户 + 未出现在用户列表中的已停用既有成员 */
+const memberRows = computed<MemberRow[]>(() => {
+  const rows: MemberRow[] = users.value.map((user) => ({
+    userId: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    isInactive: false,
+  }));
+  const knownIds = new Set(rows.map((row) => row.userId));
+
+  existingMembers.value
+    .filter((member) => member.isActive === false && !knownIds.has(member.userId))
+    .forEach((member) => {
+      rows.push({
+        userId: member.userId,
+        username: member.username,
+        displayName: member.displayName,
+        isInactive: true,
+      });
+    });
+
+  return rows;
+});
+
+/** 已选成员主键，仅启用用户可被勾选 */
 const selectedUserIds = computed(() =>
-  users.value
-    .filter((user) => memberSelected[user.id] === true)
-    .map((user) => user.id),
+  memberRows.value
+    .filter((row) => !row.isInactive && memberSelected[row.userId] === true)
+    .map((row) => row.userId),
 );
 
 /** 已选中成员里是否至少有一名合并人 */
@@ -361,18 +400,18 @@ function clearMemberSelection(): void {
 }
 
 /**
- * 用已有成员回填勾选状态。
+ * 用已有成员回填勾选状态；已停用成员只展示，不参与提交。
  * @param members 已有成员列表
  */
-function applyMemberSelection(members: { userId: string; isMerger: boolean }[]): void {
+function applyMemberSelection(members: RepoMember[]): void {
   members.forEach((member) => {
-    memberSelected[member.userId] = true;
-    memberMerger[member.userId] = member.isMerger;
+    memberSelected[member.userId] = member.isActive;
+    memberMerger[member.userId] = member.isActive && member.isMerger;
   });
 }
 
 /**
- * 打开成员弹窗并加载全部用户与已有成员。
+ * 打开成员弹窗：分页拉取全部用户与含停用成员的既有成员。
  * @param repo 目标仓库
  */
 async function openMembers(repo: Repo): Promise<void> {
@@ -380,19 +419,40 @@ async function openMembers(repo: Repo): Promise<void> {
   membersVisible.value = true;
   membersLoading.value = true;
   users.value = [];
+  existingMembers.value = [];
   clearMemberSelection();
   try {
-    const [userPage, existing] = await Promise.all([
-      fetchUsers(1, MAX_USERS),
-      fetchRepoMembers(repo.id),
+    const [allUsers, existing] = await Promise.all([
+      fetchAllUsers(),
+      fetchRepoMembers(repo.id, { includeInactive: true }),
     ]);
-    users.value = userPage.items;
+    users.value = allUsers.filter((user) => user.isActive);
+    existingMembers.value = existing;
     applyMemberSelection(existing);
   } catch (error) {
     ElMessage.error(apiErrorMessage(error, '成员数据加载失败，请稍后重试'));
   } finally {
     membersLoading.value = false;
   }
+}
+
+/**
+ * 构建待提交成员列表：当前勾选与未出现在候选列表中的启用既有成员取并集，
+ * 防止整体覆盖时静默删除未加载成员；已停用成员不提交。
+ * @returns 待提交成员列表
+ */
+function buildMemberInputs(): RepoMemberInput[] {
+  const selected = new Set(selectedUserIds.value);
+  const candidateIds = new Set(users.value.map((user) => user.id));
+  const preservedIds = existingMembers.value
+    .filter((member) => member.isActive && !candidateIds.has(member.userId))
+    .map((member) => member.userId);
+  const userIds = new Set([...selected, ...preservedIds]);
+
+  return [...userIds].map((userId) => ({
+    userId,
+    isMerger: memberMerger[userId] === true,
+  }));
 }
 
 /**
@@ -406,11 +466,7 @@ async function saveMembers(): Promise<void> {
 
   memberSaving.value = true;
   try {
-    const members = selectedUserIds.value.map((userId) => ({
-      userId,
-      isMerger: memberMerger[userId] === true,
-    }));
-    await replaceRepoMembers(repo.id, members);
+    await replaceRepoMembers(repo.id, buildMemberInputs());
     ElMessage.success('成员已保存');
     membersVisible.value = false;
     await loadRepos();
@@ -611,10 +667,15 @@ onMounted(() => {
 
     <el-dialog v-model="membersVisible" title="仓库成员" width="560px" class="members-dialog">
       <div v-loading="membersLoading">
-        <el-table :data="users" border stripe empty-text="暂无可用用户">
+        <el-table :data="memberRows" border stripe empty-text="暂无可用用户">
           <el-table-column label="成员" width="80" align="center">
             <template #default="{ row }">
-              <el-checkbox v-model="memberSelected[row.id]" class="member-select" />
+              <el-checkbox
+                v-if="!row.isInactive"
+                v-model="memberSelected[row.userId]"
+                class="member-select"
+              />
+              <span v-else class="member-inactive">—</span>
             </template>
           </el-table-column>
 
@@ -622,12 +683,21 @@ onMounted(() => {
 
           <el-table-column prop="displayName" label="显示名" min-width="130" show-overflow-tooltip />
 
+          <el-table-column label="状态" width="170" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.isInactive" type="info" size="small">
+                已停用（保存后将移除）
+              </el-tag>
+              <span v-else>启用</span>
+            </template>
+          </el-table-column>
+
           <el-table-column label="合并人" width="90" align="center">
             <template #default="{ row }">
               <el-checkbox
-                v-model="memberMerger[row.id]"
+                v-model="memberMerger[row.userId]"
                 class="member-merger"
-                :disabled="memberSelected[row.id] !== true"
+                :disabled="row.isInactive || memberSelected[row.userId] !== true"
               />
             </template>
           </el-table-column>
@@ -701,6 +771,10 @@ onMounted(() => {
 .members-hint {
   margin: 12px 0 0;
   font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.member-inactive {
   color: var(--el-text-color-secondary);
 }
 </style>
