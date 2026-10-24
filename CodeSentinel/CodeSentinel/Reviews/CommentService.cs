@@ -108,24 +108,39 @@ public sealed class CommentService(
     }
 
     /// <summary>
-    /// 读取评审单上的全部评论（含已删除与已失效），按创建时间升序；该接口有意不分页。
+    /// 读取评审单上的评论（含已删除与已失效），按创建时间升序；该接口有意不分页。
+    /// 传入 revisionId 时只返回该版本创建的评论。
     /// </summary>
     /// <param name="reviewId">评审单主键</param>
+    /// <param name="revisionId">历史版本主键，可空；省略时返回全部版本</param>
     /// <param name="userId">当前用户主键</param>
     /// <param name="ct">取消令牌</param>
     /// <returns>评论列表</returns>
     public async Task<IReadOnlyList<CommentDto>> ListAsync(
         Guid reviewId,
+        Guid? revisionId,
         Guid userId,
         CancellationToken ct)
     {
         await ReviewAccess.LoadForMemberAsync(db, reviewId, userId, ct);
+
+        // 指定历史版本时校验其属于该评审单，越权按不存在处理
+        if (revisionId is not null)
+        {
+            var belongs = await db.ReviewRevisions.AsNoTracking()
+                .AnyAsync(m => m.Id == revisionId.Value && m.ReviewId == reviewId, ct);
+            if (!belongs)
+            {
+                throw ReviewAccess.NotFound();
+            }
+        }
 
         // 单个评审单的评论量很小，按约定有意不做分页
         var rows = await (
             from comment in db.Comments.AsNoTracking()
             join author in db.Users.AsNoTracking() on comment.AuthorId equals author.Id
             where comment.ReviewId == reviewId
+                && (revisionId == null || comment.RevisionId == revisionId.Value)
             orderby comment.CreatedAt, comment.Id
             select new { Comment = comment, AuthorName = author.DisplayName })
             .ToListAsync(ct);

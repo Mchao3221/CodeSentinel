@@ -27,19 +27,23 @@ public static class CommentsEndpoints
 
     /// <summary>
     /// 读取评审单上的全部评论（含已删除与已失效），按创建时间升序；该接口有意不分页。
+    /// 传入 revisionId 时只返回该版本创建的评论。
     /// </summary>
     /// <param name="id">评审单主键</param>
+    /// <param name="revisionId">历史版本主键，可空；省略时返回全部版本</param>
     /// <param name="commentService">评论服务</param>
     /// <param name="httpContext">HTTP 上下文</param>
     /// <param name="ct">取消令牌</param>
     /// <returns>评论列表响应</returns>
     private static async Task<IResult> ListCommentsAsync(
         Guid id,
+        Guid? revisionId,
         CommentService commentService,
         HttpContext httpContext,
         CancellationToken ct)
     {
-        var items = await commentService.ListAsync(id, CurrentUser.RequireId(httpContext), ct);
+        var items = await commentService.ListAsync(
+            id, revisionId, CurrentUser.RequireId(httpContext), ct);
         return Results.Ok(new CommentListResponse(items));
     }
 

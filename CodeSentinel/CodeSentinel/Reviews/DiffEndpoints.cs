@@ -34,6 +34,7 @@ public static class DiffEndpoints
     /// 读取版本文件列表，超过 300 条时截断并标记 Truncated，同时回填当前用户的已看过状态。
     /// </summary>
     /// <param name="id">评审单主键</param>
+    /// <param name="revisionId">历史版本主键，可空；省略时取当前版本</param>
     /// <param name="db">数据库上下文</param>
     /// <param name="diffService">diff 引擎</param>
     /// <param name="mirrorService">镜像服务，用于解析删除文件的合并基</param>
@@ -42,6 +43,7 @@ public static class DiffEndpoints
     /// <returns>文件列表响应</returns>
     private static async Task<IResult> ListFilesAsync(
         Guid id,
+        Guid? revisionId,
         AppDbContext db,
         DiffService diffService,
         MirrorService mirrorService,
@@ -50,7 +52,7 @@ public static class DiffEndpoints
     {
         var userId = CurrentUser.RequireId(httpContext);
         var review = await ReviewAccess.LoadForMemberAsync(db, id, userId, ct);
-        var revision = await ViewedEndpoints.LoadCurrentRevisionAsync(db, review, ct);
+        var revision = await ViewedEndpoints.LoadRevisionAsync(db, review, revisionId, ct);
 
         var files = await diffService.GetFilesAsync(
             review.RepoId, revision.BaseSha, revision.HeadSha, ct);
@@ -71,6 +73,7 @@ public static class DiffEndpoints
     /// </summary>
     /// <param name="id">评审单主键</param>
     /// <param name="path">文件路径</param>
+    /// <param name="revisionId">历史版本主键，可空；省略时取当前版本</param>
     /// <param name="db">数据库上下文</param>
     /// <param name="diffService">diff 引擎</param>
     /// <param name="httpContext">HTTP 上下文</param>
@@ -79,6 +82,7 @@ public static class DiffEndpoints
     private static async Task<IResult> GetDiffAsync(
         Guid id,
         string? path,
+        Guid? revisionId,
         AppDbContext db,
         DiffService diffService,
         HttpContext httpContext,
@@ -87,9 +91,10 @@ public static class DiffEndpoints
         var userId = CurrentUser.RequireId(httpContext);
         var review = await ReviewAccess.LoadForMemberAsync(db, id, userId, ct);
         EnsurePath(path);
+        var revision = await ViewedEndpoints.LoadRevisionAsync(db, review, revisionId, ct);
 
         var file = await diffService.GetFileDiffAsync(
-            review.RepoId, review.BaseSha, review.HeadSha, path!, ct);
+            review.RepoId, revision.BaseSha, revision.HeadSha, path!, ct);
         return Results.Ok(file);
     }
 
@@ -99,6 +104,7 @@ public static class DiffEndpoints
     /// <param name="id">评审单主键</param>
     /// <param name="path">文件路径</param>
     /// <param name="side">OLD 或 NEW</param>
+    /// <param name="revisionId">历史版本主键，可空；省略时取当前版本</param>
     /// <param name="db">数据库上下文</param>
     /// <param name="diffService">diff 引擎</param>
     /// <param name="mirrorService">镜像服务，用于解析合并基</param>
@@ -109,6 +115,7 @@ public static class DiffEndpoints
         Guid id,
         string? path,
         string? side,
+        Guid? revisionId,
         AppDbContext db,
         DiffService diffService,
         MirrorService mirrorService,
@@ -118,9 +125,12 @@ public static class DiffEndpoints
         var userId = CurrentUser.RequireId(httpContext);
         var review = await ReviewAccess.LoadForMemberAsync(db, id, userId, ct);
         EnsurePath(path);
-        await diffService.EnsurePathInDiffAsync(review.RepoId, review.BaseSha, review.HeadSha, path!, ct);
+        var revision = await ViewedEndpoints.LoadRevisionAsync(db, review, revisionId, ct);
+        await diffService.EnsurePathInDiffAsync(
+            review.RepoId, revision.BaseSha, revision.HeadSha, path!, ct);
 
-        var commitSha = await ResolveBlobCommitAsync(mirrorService, review, side, ct);
+        var commitSha = await ResolveBlobCommitAsync(
+            mirrorService, review.RepoId, revision.BaseSha, revision.HeadSha, side, ct);
         var blob = await diffService.GetBlobAsync(review.RepoId, commitSha, path!, ct);
         return Results.Ok(blob);
     }
@@ -144,21 +154,25 @@ public static class DiffEndpoints
     /// 解析 blob 应读取的提交：OLD 取合并基，NEW 取 head。
     /// </summary>
     /// <param name="mirrorService">镜像服务</param>
-    /// <param name="review">评审单</param>
+    /// <param name="repoId">仓库主键</param>
+    /// <param name="baseSha">版本基线提交</param>
+    /// <param name="headSha">版本终点提交</param>
     /// <param name="side">OLD 或 NEW</param>
     /// <param name="ct">取消令牌</param>
     /// <returns>提交 SHA</returns>
     private static async Task<string> ResolveBlobCommitAsync(
         MirrorService mirrorService,
-        Review review,
+        Guid repoId,
+        string baseSha,
+        string headSha,
         string? side,
         CancellationToken ct)
     {
         if (string.Equals(side, "OLD", StringComparison.OrdinalIgnoreCase))
         {
             var mergeBase = await mirrorService.GetMergeBaseAsync(
-                review.RepoId, review.BaseSha, review.HeadSha, ct);
-            return mergeBase ?? review.BaseSha;
+                repoId, baseSha, headSha, ct);
+            return mergeBase ?? baseSha;
         }
 
         if (side is not null && !string.Equals(side, "NEW", StringComparison.OrdinalIgnoreCase))
@@ -169,7 +183,7 @@ public static class DiffEndpoints
                 "side 只支持 OLD 或 NEW");
         }
 
-        return review.HeadSha;
+        return headSha;
     }
 }
 

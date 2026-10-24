@@ -90,6 +90,30 @@ public static class ViewedEndpoints
     }
 
     /// <summary>
+    /// 按请求读取评审单版本：未指定时取当前版本，指定时必须属于该评审单，否则按不存在处理。
+    /// </summary>
+    /// <param name="db">数据库上下文</param>
+    /// <param name="review">评审单</param>
+    /// <param name="revisionId">请求中的历史版本主键，可空</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>命中的版本</returns>
+    internal static async Task<ReviewRevision> LoadRevisionAsync(
+        AppDbContext db,
+        Review review,
+        Guid? revisionId,
+        CancellationToken ct)
+    {
+        if (revisionId is null)
+        {
+            return await LoadCurrentRevisionAsync(db, review, ct);
+        }
+
+        return await db.ReviewRevisions.AsNoTracking()
+            .FirstOrDefaultAsync(m => m.Id == revisionId.Value && m.ReviewId == review.Id, ct)
+            ?? throw ReviewAccess.NotFound();
+    }
+
+    /// <summary>
     /// 计算当前用户在当前版本中已看过的文件路径集合；blob 不一致的旧行视为未看过且不删除。
     /// </summary>
     /// <param name="db">数据库上下文</param>
