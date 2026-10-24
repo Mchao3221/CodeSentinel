@@ -103,6 +103,91 @@ public class SyncTests
     }
 
     /// <summary>
+    /// 同一仓库的 fetch 锁同一时间只能被一个调用方持有，释放后可再次获取。
+    /// </summary>
+    [Fact]
+    public async Task Sync_throttle_allows_only_one_fetch_per_repo()
+    {
+        using var factory = new TestAppFactory();
+        var throttle = factory.Services.GetRequiredService<SyncThrottle>();
+        var repoId = Guid.NewGuid();
+
+        Assert.True(await throttle.TryEnterAsync(repoId, CancellationToken.None));
+        Assert.False(await throttle.TryEnterAsync(repoId, CancellationToken.None));
+
+        throttle.Exit(repoId);
+
+        Assert.True(await throttle.TryEnterAsync(repoId, CancellationToken.None));
+        throttle.Exit(repoId);
+    }
+
+    /// <summary>
+    /// 仓库正在同步时 worker 应跳过本轮，且不能记成失败。
+    /// </summary>
+    [Fact]
+    public async Task Worker_skips_repo_while_lock_is_held()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var repo = factory.SeedRepo(source.Url, UniqueName("locked"));
+        var throttle = factory.Services.GetRequiredService<SyncThrottle>();
+        var worker = factory.Services.GetRequiredService<MirrorSyncWorker>();
+
+        Assert.True(await throttle.TryEnterAsync(repo.Id, CancellationToken.None));
+        try
+        {
+            await worker.RunOnceAsync(CancellationToken.None);
+
+            var skipped = await ReadRepoAsync(factory, repo.Id);
+            Assert.Null(skipped.LastFetchedAt);
+            Assert.Null(skipped.LastError);
+            Assert.Null(skipped.NextAttemptAt);
+            Assert.Equal(0, skipped.FailureCount);
+        }
+        finally
+        {
+            throttle.Exit(repo.Id);
+        }
+
+        await worker.RunOnceAsync(CancellationToken.None);
+
+        var fetched = await ReadRepoAsync(factory, repo.Id);
+        Assert.NotNull(fetched.LastFetchedAt);
+        Assert.Null(fetched.LastError);
+    }
+
+    /// <summary>
+    /// 仓库正在同步时手动触发应返回 429，释放后可正常触发。
+    /// </summary>
+    [Fact]
+    public async Task Manual_sync_reports_in_progress_while_lock_is_held()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var repo = factory.SeedRepo(source.Url, UniqueName("busy"));
+        var admin = await factory.LoginAsAdminAsync();
+        var throttle = factory.Services.GetRequiredService<SyncThrottle>();
+
+        Assert.True(await throttle.TryEnterAsync(repo.Id, CancellationToken.None));
+        try
+        {
+            var busy = await admin.PostJsonWithCsrfAsync($"/api/repos/{repo.Id}/sync", new { });
+            var error = await busy.Content.ReadFromJsonAsync<ErrorBody>();
+
+            Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, busy.StatusCode);
+            Assert.NotNull(error);
+            Assert.Equal("SYNC_IN_PROGRESS", error.Code);
+        }
+        finally
+        {
+            throttle.Exit(repo.Id);
+        }
+
+        var success = await admin.PostJsonWithCsrfAsync($"/api/repos/{repo.Id}/sync", new { });
+        Assert.Equal(System.Net.HttpStatusCode.OK, success.StatusCode);
+    }
+
+    /// <summary>
     /// 非成员触发同步应返回 404，不暴露仓库存在性。
     /// </summary>
     [Fact]

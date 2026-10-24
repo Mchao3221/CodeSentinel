@@ -30,6 +30,7 @@ public sealed class MirrorSyncWorker : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly MirrorService _mirrorService;
     private readonly CredentialProtector _credentialProtector;
+    private readonly SyncThrottle _syncThrottle;
     private readonly SyncOptions _options;
     private readonly ILogger<MirrorSyncWorker> _logger;
 
@@ -39,18 +40,21 @@ public sealed class MirrorSyncWorker : BackgroundService
     /// <param name="scopeFactory">作用域工厂，每轮扫描创建独立 DbContext</param>
     /// <param name="mirrorService">镜像服务</param>
     /// <param name="credentialProtector">仓库凭据解密器</param>
+    /// <param name="syncThrottle">同步协调器，保证同一仓库同时只有一个 fetch</param>
     /// <param name="options">同步配置</param>
     /// <param name="logger">日志记录器</param>
     public MirrorSyncWorker(
         IServiceScopeFactory scopeFactory,
         MirrorService mirrorService,
         CredentialProtector credentialProtector,
+        SyncThrottle syncThrottle,
         IOptions<SyncOptions> options,
         ILogger<MirrorSyncWorker> logger)
     {
         _scopeFactory = scopeFactory;
         _mirrorService = mirrorService;
         _credentialProtector = credentialProtector;
+        _syncThrottle = syncThrottle;
         _options = options.Value;
         _logger = logger;
     }
@@ -119,7 +123,21 @@ public sealed class MirrorSyncWorker : BackgroundService
                 continue;
             }
 
-            await SyncOneAsync(db, repo, ct);
+            // 仓库正在被手动同步或其他轮次处理时跳过本轮，不记为失败
+            if (!await _syncThrottle.TryEnterAsync(repo.Id, ct))
+            {
+                _logger.LogDebug("仓库 {RepoId} 正在同步，跳过本轮", repo.Id);
+                continue;
+            }
+
+            try
+            {
+                await SyncOneAsync(db, repo, ct);
+            }
+            finally
+            {
+                _syncThrottle.Exit(repo.Id);
+            }
         }
     }
 

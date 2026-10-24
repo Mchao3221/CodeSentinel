@@ -1,4 +1,6 @@
+using System.Net;
 using CodeSentinel.Git;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -92,6 +94,44 @@ public class GitCliTests
             TestPaths.DeleteDirectory(askPassRoot);
             TestPaths.DeleteDirectory(workRoot);
         }
+    }
+
+    /// <summary>
+    /// git 可执行文件不存在时应返回 false，而不是抛出启动进程异常。
+    /// </summary>
+    [Fact]
+    public async Task Verify_available_returns_false_when_executable_missing()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Git:ExecutablePath"] = $"missing-git-{Guid.NewGuid():N}"
+            })
+            .Build();
+
+        var git = new GitCli(configuration, NullLogger<GitCli>.Instance);
+
+        Assert.False(await git.VerifyAvailableAsync(CancellationToken.None));
+    }
+
+    /// <summary>
+    /// Testing 环境在 git 不可用时仍应正常启动宿主。
+    /// </summary>
+    [Fact]
+    public async Task Testing_host_starts_when_git_is_missing()
+    {
+        using var factory = new TestAppFactory();
+        using var badFactory = factory.WithWebHostBuilder(builder =>
+            builder.ConfigureAppConfiguration((_, configuration) =>
+                configuration.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Git:ExecutablePath"] = $"missing-git-{Guid.NewGuid():N}"
+                })));
+
+        using var client = badFactory.CreateClient();
+        var response = await client.GetAsync("/api/health");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     /// <summary>

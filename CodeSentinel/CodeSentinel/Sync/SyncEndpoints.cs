@@ -42,20 +42,36 @@ public static class SyncEndpoints
     {
         var repo = await RepoAccess.EnsureAsync(db, httpContext, id, ct);
 
-        if (!throttle.TryAcquire(repo.Id, DateTime.UtcNow))
+        // 同一仓库同时只允许一个 fetch：worker 正在同步时直接拒绝
+        if (!await throttle.TryEnterAsync(repo.Id, ct))
         {
             throw new ApiException(
                 StatusCodes.Status429TooManyRequests,
-                "SYNC_THROTTLED",
-                $"同步过于频繁，请 {SyncThrottle.ThrottleSeconds} 秒后再试");
+                "SYNC_IN_PROGRESS",
+                "仓库正在同步，请稍后再试");
         }
 
-        var credentials = RepoCredentials.Read(credentialProtector, repo);
-        await mirrorService.EnsureAsync(repo.Id, repo.GitUrl, credentials, ct);
-        await mirrorService.FetchAsync(repo.Id, repo.GitUrl, credentials, ct);
-        await MarkSyncedAsync(db, repo.Id, ct);
+        try
+        {
+            if (!throttle.TryBeginWindow(repo.Id, DateTime.UtcNow))
+            {
+                throw new ApiException(
+                    StatusCodes.Status429TooManyRequests,
+                    "SYNC_THROTTLED",
+                    $"同步过于频繁，请 {SyncThrottle.ThrottleSeconds} 秒后再试");
+            }
 
-        return Results.Ok(new { synced = true });
+            var credentials = RepoCredentials.Read(credentialProtector, repo);
+            await mirrorService.EnsureAsync(repo.Id, repo.GitUrl, credentials, ct);
+            await mirrorService.FetchAsync(repo.Id, repo.GitUrl, credentials, ct);
+            await MarkSyncedAsync(db, repo.Id, ct);
+
+            return Results.Ok(new { synced = true });
+        }
+        finally
+        {
+            throttle.Exit(repo.Id);
+        }
     }
 
     /// <summary>

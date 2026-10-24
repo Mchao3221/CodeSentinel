@@ -48,14 +48,31 @@ public sealed class GitCli
     public Func<AskPassScript> AskPassFactory { get; init; } = () => AskPassScript.Create();
 
     /// <summary>
-    /// 验证 git 命令可用，供应用启动自检使用。
+    /// 验证 git 命令可用，供应用启动自检使用；可执行文件不存在时返回 false。
     /// </summary>
     /// <param name="ct">取消令牌</param>
     /// <returns>git --version 是否执行成功</returns>
     public async Task<bool> VerifyAvailableAsync(CancellationToken ct)
     {
-        var result = await RunAsync(Path.GetTempPath(), ["--version"], null, ct);
-        return result.ExitCode == 0;
+        try
+        {
+            var result = await RunAsync(Path.GetTempPath(), ["--version"], null, ct);
+            return result.ExitCode == 0;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Win32Exception)
+        {
+            // 可执行文件不存在或无法启动
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            // Process.Start 返回 false
+            return false;
+        }
     }
 
     /// <summary>
