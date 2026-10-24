@@ -8,6 +8,7 @@ import { ElMessage, type FormInstance, type FormRules } from 'element-plus';
 
 import { closeReview, decideReview, fetchReviewDetail, refreshReview } from '../api/reviews';
 import type { ReviewDetail, ReviewRevision, ReviewStatus } from '../api/types';
+import DiffFileList from '../components/diff/DiffFileList.vue';
 import MergeGuide from '../components/MergeGuide.vue';
 import ReviewerList from '../components/ReviewerList.vue';
 import ReviewHeader from '../components/ReviewHeader.vue';
@@ -108,6 +109,16 @@ const selectedRevision = computed<ReviewRevision | null>(() => {
 
 /** 当前选中版本主键 */
 const selectedRevisionId = computed(() => selectedRevision.value?.id ?? '');
+
+/** 当前版本主键（最新版本） */
+const currentRevisionId = computed(() =>
+  revisions.value.length === 0 ? '' : revisions.value[revisions.value.length - 1].id,
+);
+
+/** 是否正在查看历史版本 */
+const isHistorical = computed(
+  () => selectedRevisionId.value !== '' && selectedRevisionId.value !== currentRevisionId.value,
+);
 
 /** 当前状态是否仍可操作 */
 const isActive = computed(
@@ -352,7 +363,11 @@ onMounted(() => {
       />
 
       <div class="review-detail-diff">
-        <!-- Task 19 在此渲染变更文件与行级评论 -->
+        <DiffFileList
+          :review-id="detail.id"
+          :revision-id="selectedRevisionId"
+          :is-historical="isHistorical"
+        />
       </div>
     </template>
 

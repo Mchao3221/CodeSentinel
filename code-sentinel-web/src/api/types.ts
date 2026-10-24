@@ -422,3 +422,122 @@ export interface CreateCommentInput {
   /** 回复的父评论主键，可空 */
   parentId?: string;
 }
+
+/**
+ * diff 中的文件变更类型，后端以 SNAKE_CASE_UPPER 序列化。
+ */
+export type FileChangeStatus = 'ADDED' | 'MODIFIED' | 'DELETED' | 'RENAMED';
+
+/**
+ * diff 行的类型，后端以 SNAKE_CASE_UPPER 序列化。
+ */
+export type DiffLineType = 'CONTEXT' | 'ADD' | 'DELETE';
+
+/**
+ * blob 读取侧。
+ */
+export type DiffSide = 'OLD' | 'NEW';
+
+/**
+ * 文件列表项。
+ */
+export interface DiffFileListItem {
+  /** 当前路径（重命名后为新路径） */
+  path: string;
+  /** 重命名前的路径，非重命名时为 null */
+  oldPath: string | null;
+  /** 变更类型 */
+  status: FileChangeStatus;
+  /** 新增行数 */
+  additions: number;
+  /** 删除行数 */
+  deletions: number;
+  /** 是否为二进制文件 */
+  isBinary: boolean;
+  /** 是否超过单文件 diff 大小限制 */
+  isTooLarge: boolean;
+  /** 当前用户是否已看过 */
+  viewed: boolean;
+}
+
+/**
+ * 文件列表响应。
+ */
+export interface DiffFileList {
+  /** 文件摘要列表（截断后） */
+  items: DiffFileListItem[];
+  /** 真实文件总数 */
+  total: number;
+  /** 当前用户在当前版本已看过的文件数 */
+  viewedCount: number;
+  /** 当前版本文件总数 */
+  fileCount: number;
+  /** 是否因超过上限被截断 */
+  truncated: boolean;
+}
+
+/**
+ * diff 中的一行。
+ */
+export interface DiffLine {
+  /** 行类型 */
+  type: DiffLineType;
+  /** 旧文件行号，新增行时为 null */
+  oldLine: number | null;
+  /** 新文件行号，删除行时为 null */
+  newLine: number | null;
+  /** 不带前缀的行文本 */
+  text: string;
+}
+
+/**
+ * 一个 diff 块及其行号范围。
+ */
+export interface DiffHunk {
+  /** 旧文件起始行号 */
+  oldStart: number;
+  /** 旧文件覆盖行数 */
+  oldLines: number;
+  /** 新文件起始行号 */
+  newStart: number;
+  /** 新文件覆盖行数 */
+  newLines: number;
+  /** 块内的行 */
+  lines: DiffLine[];
+}
+
+/**
+ * 单文件 diff 详情。
+ */
+export interface DiffFile {
+  /** 当前路径（重命名后为新路径） */
+  path: string;
+  /** 重命名前的路径，非重命名时为 null */
+  oldPath: string | null;
+  /** 变更类型 */
+  status: FileChangeStatus;
+  /** 新增行数 */
+  additions: number;
+  /** 删除行数 */
+  deletions: number;
+  /** 是否为二进制文件 */
+  isBinary: boolean;
+  /** 是否超过单文件 diff 大小限制 */
+  isTooLarge: boolean;
+  /** diff 块，二进制或超限时为空 */
+  hunks: DiffHunk[];
+}
+
+/**
+ * 单个文件的全文内容。
+ */
+export interface BlobContent {
+  /** 文件路径 */
+  path: string;
+  /** UTF-8 文本内容，二进制或超限时为空字符串 */
+  content: string;
+  /** 是否为二进制内容 */
+  isBinary: boolean;
+  /** 是否超过大小限制 */
+  isTooLarge: boolean;
+}
