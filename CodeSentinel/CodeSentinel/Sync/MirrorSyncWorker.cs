@@ -1,7 +1,9 @@
+using CodeSentinel.Common;
 using CodeSentinel.Data;
 using CodeSentinel.Data.Entities;
 using CodeSentinel.Git;
 using CodeSentinel.Repos;
+using CodeSentinel.Reviews;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -103,6 +105,7 @@ public sealed class MirrorSyncWorker : BackgroundService
     {
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var revisionService = scope.ServiceProvider.GetRequiredService<RevisionService>();
         var now = DateTime.UtcNow;
 
         var repos = await db.Repos
@@ -132,7 +135,7 @@ public sealed class MirrorSyncWorker : BackgroundService
 
             try
             {
-                await SyncOneAsync(db, repo, ct);
+                await SyncOneAsync(db, repo, revisionService, ct);
             }
             finally
             {
@@ -161,9 +164,14 @@ public sealed class MirrorSyncWorker : BackgroundService
     /// </summary>
     /// <param name="db">数据库上下文</param>
     /// <param name="repo">待同步仓库</param>
+    /// <param name="revisionService">评审版本服务，fetch 成功后跟进新提交</param>
     /// <param name="ct">取消令牌</param>
     /// <returns>同步任务</returns>
-    private async Task SyncOneAsync(AppDbContext db, Repo repo, CancellationToken ct)
+    private async Task SyncOneAsync(
+        AppDbContext db,
+        Repo repo,
+        RevisionService revisionService,
+        CancellationToken ct)
     {
         GitCredentials? credentials = null;
 
@@ -173,6 +181,7 @@ public sealed class MirrorSyncWorker : BackgroundService
             await _mirrorService.FetchAsync(repo.Id, repo.GitUrl, credentials, ct);
             ApplySuccess(repo);
             await db.SaveChangesAsync(ct);
+            await SyncActiveReviewsSafelyAsync(revisionService, repo, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -192,6 +201,137 @@ public sealed class MirrorSyncWorker : BackgroundService
                 repo.FailureCount,
                 repo.LastError);
         }
+    }
+
+    /// <summary>
+    /// 立即同步单个仓库：按手动同步语义校验节流，成功后更新仓库状态并跟进活跃评审单。
+    /// </summary>
+    /// <param name="repoId">仓库主键</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>同步任务</returns>
+    public async Task SyncNowAsync(Guid repoId, CancellationToken ct)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var revisionService = scope.ServiceProvider.GetRequiredService<RevisionService>();
+        var repo = await db.Repos.AsNoTracking()
+            .FirstOrDefaultAsync(m => m.Id == repoId, ct)
+            ?? throw RepositoryNotFound();
+
+        // 同一仓库同时只允许一个 fetch：worker 正在同步时直接拒绝
+        if (!await _syncThrottle.TryEnterAsync(repo.Id, ct))
+        {
+            throw SyncInProgress();
+        }
+
+        try
+        {
+            if (!_syncThrottle.TryBeginWindow(repo.Id, DateTime.UtcNow))
+            {
+                throw SyncThrottled();
+            }
+
+            var credentials = RepoCredentials.Read(_credentialProtector, repo);
+            await _mirrorService.EnsureAsync(repo.Id, repo.GitUrl, credentials, ct);
+            await _mirrorService.FetchAsync(repo.Id, repo.GitUrl, credentials, ct);
+            await MarkSyncedAsync(db, repo.Id, ct);
+            await revisionService.SyncActiveReviewsAsync(repo.Id, ct);
+        }
+        finally
+        {
+            _syncThrottle.Exit(repo.Id);
+        }
+    }
+
+    /// <summary>
+    /// 跟进仓库活跃评审单的新提交；失败只记录日志，不影响镜像同步结果与退避。
+    /// </summary>
+    /// <param name="revisionService">评审版本服务</param>
+    /// <param name="repo">已同步仓库</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns></returns>
+    private async Task SyncActiveReviewsSafelyAsync(
+        RevisionService revisionService,
+        Repo repo,
+        CancellationToken ct)
+    {
+        try
+        {
+            await revisionService.SyncActiveReviewsAsync(repo.Id, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "仓库 {RepoName}（{RepoId}）评审版本同步失败，本轮镜像同步仍视为成功",
+                repo.Name,
+                repo.Id);
+        }
+    }
+
+    /// <summary>
+    /// 同步成功后写回最近同步时间并清空错误、失败次数与退避时间。
+    /// </summary>
+    /// <param name="db">数据库上下文</param>
+    /// <param name="repoId">仓库主键</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>更新任务</returns>
+    private static async Task MarkSyncedAsync(
+        AppDbContext db,
+        Guid repoId,
+        CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        await db.Repos
+            .Where(m => m.Id == repoId)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(m => m.LastFetchedAt, now)
+                    .SetProperty(m => m.LastError, (string?)null)
+                    .SetProperty(m => m.FailureCount, 0)
+                    .SetProperty(m => m.NextAttemptAt, (DateTime?)null)
+                    .SetProperty(m => m.UpdatedAt, now),
+                ct);
+    }
+
+    /// <summary>
+    /// 构造“仓库不存在”异常。
+    /// </summary>
+    /// <returns>业务异常</returns>
+    private static ApiException RepositoryNotFound()
+    {
+        return new ApiException(
+            StatusCodes.Status404NotFound,
+            "NOT_FOUND",
+            "仓库不存在");
+    }
+
+    /// <summary>
+    /// 构造“仓库正在同步”异常。
+    /// </summary>
+    /// <returns>业务异常</returns>
+    private static ApiException SyncInProgress()
+    {
+        return new ApiException(
+            StatusCodes.Status429TooManyRequests,
+            "SYNC_IN_PROGRESS",
+            "仓库正在同步，请稍后再试");
+    }
+
+    /// <summary>
+    /// 构造“同步过于频繁”异常。
+    /// </summary>
+    /// <returns>业务异常</returns>
+    private static ApiException SyncThrottled()
+    {
+        return new ApiException(
+            StatusCodes.Status429TooManyRequests,
+            "SYNC_THROTTLED",
+            $"同步过于频繁，请 {SyncThrottle.ThrottleSeconds} 秒后再试");
     }
 
     /// <summary>

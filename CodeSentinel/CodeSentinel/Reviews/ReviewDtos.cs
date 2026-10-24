@@ -62,6 +62,12 @@ public sealed record ReviewUserRef(Guid Id, string DisplayName);
 public sealed record ReviewRevisionDto(Guid Id, int Seq, string HeadSha, DateTime CreatedAt);
 
 /// <summary>
+/// 评审版本列表响应。该接口有意不分页，一次返回全部版本。
+/// </summary>
+/// <param name="Items">版本列表，按版本号升序</param>
+public sealed record ReviewRevisionListDto(IReadOnlyList<ReviewRevisionDto> Items);
+
+/// <summary>
 /// 评审单审核人。
 /// </summary>
 /// <param name="UserId">审核人主键</param>

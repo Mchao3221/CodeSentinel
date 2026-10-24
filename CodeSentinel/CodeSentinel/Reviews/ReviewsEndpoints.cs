@@ -2,6 +2,7 @@ using CodeSentinel.Auth;
 using CodeSentinel.Common;
 using CodeSentinel.Data;
 using CodeSentinel.Data.Entities;
+using CodeSentinel.Sync;
 using Microsoft.AspNetCore.Http.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -26,11 +27,66 @@ public static class ReviewsEndpoints
 
         group.MapGet(string.Empty, ListReviewsAsync);
         group.MapGet("/{id:guid}", GetReviewAsync);
+        group.MapGet("/{id:guid}/revisions", ListRevisionsAsync);
         group.MapPost(string.Empty, CreateReviewAsync);
+        group.MapPost("/{id:guid}/refresh", RefreshReviewAsync);
         group.MapPost("/{id:guid}/decisions", DecideReviewAsync);
         group.MapPost("/{id:guid}/close", CloseReviewAsync);
         group.MapPost("/{id:guid}/reviewers", AddReviewersAsync);
         group.MapDelete("/{id:guid}/reviewers/{userId:guid}", RemoveReviewerAsync);
+    }
+
+    /// <summary>
+    /// 刷新评审单：触发一次仓库同步，跟进新提交后返回最新详情。
+    /// </summary>
+    /// <param name="id">评审单主键</param>
+    /// <param name="db">数据库上下文</param>
+    /// <param name="reviewService">评审单服务</param>
+    /// <param name="syncWorker">镜像同步任务，负责节流与 fetch</param>
+    /// <param name="httpContext">HTTP 上下文</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>评审单详情</returns>
+    private static async Task<IResult> RefreshReviewAsync(
+        Guid id,
+        AppDbContext db,
+        ReviewService reviewService,
+        MirrorSyncWorker syncWorker,
+        HttpContext httpContext,
+        CancellationToken ct)
+    {
+        var userId = CurrentUser.RequireId(httpContext);
+        var review = await ReviewAccess.LoadForMemberAsync(db, id, userId, ct);
+
+        await syncWorker.SyncNowAsync(review.RepoId, ct);
+
+        return await BuildDetailResultAsync(
+            reviewService, id, userId, CurrentUser.IsAdmin(httpContext), ct);
+    }
+
+    /// <summary>
+    /// 读取评审单的全部版本，按版本号升序；该接口有意不分页。
+    /// </summary>
+    /// <param name="id">评审单主键</param>
+    /// <param name="db">数据库上下文</param>
+    /// <param name="httpContext">HTTP 上下文</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>版本列表</returns>
+    private static async Task<IResult> ListRevisionsAsync(
+        Guid id,
+        AppDbContext db,
+        HttpContext httpContext,
+        CancellationToken ct)
+    {
+        var userId = CurrentUser.RequireId(httpContext);
+        var review = await ReviewAccess.LoadForMemberAsync(db, id, userId, ct);
+
+        var items = await db.ReviewRevisions.AsNoTracking()
+            .Where(m => m.ReviewId == review.Id)
+            .OrderBy(m => m.Seq)
+            .Select(m => new ReviewRevisionDto(m.Id, m.Seq, m.HeadSha, m.CreatedAt))
+            .ToListAsync(ct);
+
+        return Results.Ok(new ReviewRevisionListDto(items));
     }
 
     /// <summary>

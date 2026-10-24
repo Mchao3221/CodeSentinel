@@ -107,6 +107,30 @@ public sealed class TestGitRepo : IDisposable
     }
 
     /// <summary>
+    /// 在指定分支追加一个提交并推送，随后切回 main，用于制造“分支有新提交”的场景。
+    /// </summary>
+    /// <param name="branchName">分支名</param>
+    /// <returns>新提交 SHA</returns>
+    public async Task<string> CommitOnBranchAsync(string branchName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(branchName);
+
+        // 分支名中的斜杠不能直接作为文件名
+        var filePrefix = branchName.Replace('/', '-');
+        await RunGitAsync(WorkPath, ["checkout", branchName]);
+
+        var fileName = $"{filePrefix}-{Guid.NewGuid():N}.txt";
+        await File.WriteAllTextAsync(Path.Combine(WorkPath, fileName), "new commit\n");
+        await RunGitAsync(WorkPath, ["add", fileName]);
+        await RunGitAsync(WorkPath, ["commit", "-m", $"{branchName} new commit"]);
+        await RunGitAsync(WorkPath, ["push", "origin", branchName]);
+
+        var sha = (await RunGitAsync(WorkPath, ["rev-parse", "HEAD"])).Trim();
+        await RunGitAsync(WorkPath, ["checkout", "main"]);
+        return sha;
+    }
+
+    /// <summary>
     /// 在 main 上追加一个提交并推送，用于制造与旧分支分叉的场景。
     /// </summary>
     /// <returns>main 新的提交 SHA</returns>

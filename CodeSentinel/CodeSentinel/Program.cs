@@ -104,6 +104,8 @@ builder.Services.AddScoped<AuditService>();
 builder.Services.AddScoped<NotificationService>();
 builder.Services.AddScoped<ReviewService>();
 builder.Services.AddScoped<ReviewReviewerService>();
+builder.Services.AddScoped<AnchorService>();
+builder.Services.AddScoped<RevisionService>();
 builder.Services.AddScoped<CsrfEndpointFilter>();
 
 var app = builder.Build();
