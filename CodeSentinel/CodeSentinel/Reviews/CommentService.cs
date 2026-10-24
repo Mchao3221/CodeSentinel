@@ -75,6 +75,7 @@ public sealed class CommentService(
         var file = await diffService.GetFileDiffAsync(
             review.RepoId, revision.BaseSha, revision.HeadSha, path, ct);
         EnsureCommentable(file);
+        var filePath = NormalizePath(file, side, path);
         var line = FindLine(file, side, request.Line) ?? throw LineNotInDiff();
         var blobSha = await ResolveBlobShaAsync(review, revision, file, side, ct);
 
@@ -84,7 +85,7 @@ public sealed class CommentService(
             ReviewId = review.Id,
             RevisionId = revision.Id,
             AuthorId = authorId,
-            FilePath = path,
+            FilePath = filePath,
             Side = ToSideValue(side),
             LineNumber = request.Line,
             AnchorText = line.Text,
@@ -354,6 +355,29 @@ public sealed class CommentService(
     }
 
     /// <summary>
+    /// 按评论侧归一化落库路径：NEW 侧使用当前路径，OLD 侧使用重命名前的路径。
+    /// NEW 侧只匹配到重命名前路径时说明请求与当前文件不一致，按文件不在 diff 中处理。
+    /// </summary>
+    /// <param name="file">文件 diff</param>
+    /// <param name="side">评论所在侧</param>
+    /// <param name="requestedPath">请求中的路径</param>
+    /// <returns>落库路径</returns>
+    private static string NormalizePath(DiffFile file, CommentSide side, string requestedPath)
+    {
+        if (side == CommentSide.Old)
+        {
+            return file.OldPath ?? file.Path;
+        }
+
+        if (!string.Equals(requestedPath, file.Path, StringComparison.Ordinal))
+        {
+            throw FileNotInDiff();
+        }
+
+        return file.Path;
+    }
+
+    /// <summary>
     /// 按侧与行号在 diff 中查找可评论的行：NEW 侧接受上下文与新增行，OLD 侧接受上下文与删除行。
     /// </summary>
     /// <param name="file">文件 diff</param>
@@ -579,6 +603,18 @@ public sealed class CommentService(
             StatusCodes.Status400BadRequest,
             "LINE_NOT_IN_DIFF",
             "该行不在当前版本的 diff 中");
+    }
+
+    /// <summary>
+    /// 构造“文件不在本次 diff 中”异常。
+    /// </summary>
+    /// <returns>业务异常</returns>
+    private static ApiException FileNotInDiff()
+    {
+        return new ApiException(
+            StatusCodes.Status404NotFound,
+            "FILE_NOT_IN_DIFF",
+            "文件不在本次 diff 中");
     }
 
     /// <summary>

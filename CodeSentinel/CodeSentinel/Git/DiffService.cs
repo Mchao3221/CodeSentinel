@@ -136,6 +136,35 @@ public sealed class DiffService
     }
 
     /// <summary>
+    /// 读取两个提交之间的结构化 diff，一次覆盖全部文件，供评论重新定位使用。
+    /// 使用 -U0 只输出变更行附近内容，重命名按 50% 相似度识别。
+    /// </summary>
+    /// <param name="repoId">仓库主键</param>
+    /// <param name="fromSha">旧提交</param>
+    /// <param name="toSha">新提交</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>解析后的文件 diff 列表</returns>
+    public async Task<IReadOnlyList<DiffFile>> GetChangesAsync(
+        Guid repoId,
+        string fromSha,
+        string toSha,
+        CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(fromSha);
+        ArgumentException.ThrowIfNullOrWhiteSpace(toSha);
+
+        var mirrorPath = _mirror.GetMirrorPath(repoId);
+        var result = await _git.RunRawAsync(
+            mirrorPath,
+            ["diff", "--no-color", "-U0", "--find-renames=50%", fromSha, toSha, "--"],
+            null,
+            ct);
+        EnsureSucceeded(result.ExitCode, result.StdErr, "读取版本间 diff 失败");
+
+        return UnifiedDiffParser.Parse(Encoding.UTF8.GetString(result.StdOut));
+    }
+
+    /// <summary>
     /// 读取某个提交下文件全文；超过 2 MB 或含 NUL 字节时标记并清空内容。
     /// </summary>
     /// <param name="repoId">仓库主键</param>
