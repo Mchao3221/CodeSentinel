@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="CodeSentinel.Tests/CodeSentinel.Tests.csproj" />
+  <Project Path="CodeSentinel/CodeSentinel.csproj" />
+</Solution>
