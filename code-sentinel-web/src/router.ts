@@ -4,6 +4,7 @@ import AppLayout from './layouts/AppLayout.vue';
 import LoginView from './views/LoginView.vue';
 import NotificationListView from './views/NotificationListView.vue';
 import RepoListView from './views/RepoListView.vue';
+import ReviewCreateView from './views/ReviewCreateView.vue';
 import ReviewDetailView from './views/ReviewDetailView.vue';
 import ReviewListView from './views/ReviewListView.vue';
 import UserListView from './views/UserListView.vue';
@@ -35,6 +36,12 @@ const routes: RouteRecordRaw[] = [
         path: 'reviews',
         name: 'reviews',
         component: ReviewListView,
+      },
+      {
+        // 必须排在 reviews/:id 之前，避免 new 被当作评审单主键
+        path: 'reviews/new',
+        name: 'review-create',
+        component: ReviewCreateView,
       },
       {
         path: 'reviews/:id',
