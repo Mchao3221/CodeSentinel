@@ -543,3 +543,165 @@ export interface BlobContent {
   /** 是否超过大小限制 */
   isTooLarge: boolean;
 }
+
+/**
+ * 仓库凭据类型。
+ */
+export type RepoCredentialKind = 'PASSWORD' | 'TOKEN';
+
+/**
+ * 新建仓库请求。
+ */
+export interface CreateRepoInput {
+  /** 仓库名称 */
+  name: string;
+  /** git 地址 */
+  gitUrl: string;
+  /** 默认目标分支 */
+  defaultBaseBranch: string;
+  /** 只读凭据明文，格式为 username:secret，可选 */
+  credential?: string;
+  /** 凭据类型，默认 PASSWORD */
+  credentialKind?: RepoCredentialKind;
+  /** 同步间隔秒数，默认 300 */
+  syncIntervalSeconds?: number;
+}
+
+/**
+ * 局部更新仓库请求，未提供的字段保持不变。
+ */
+export interface UpdateRepoInput {
+  /** 仓库名称 */
+  name?: string;
+  /** git 地址 */
+  gitUrl?: string;
+  /** 默认目标分支 */
+  defaultBaseBranch?: string;
+  /** 只读凭据明文，空串表示清空，不传表示保持不变 */
+  credential?: string;
+  /** 凭据类型 */
+  credentialKind?: RepoCredentialKind;
+  /** 同步间隔秒数 */
+  syncIntervalSeconds?: number;
+  /** 是否启用 */
+  isActive?: boolean;
+}
+
+/**
+ * 连接测试结果。
+ */
+export interface TestConnectionResult {
+  /** 是否连接成功 */
+  ok: boolean;
+}
+
+/**
+ * 手动同步结果。
+ */
+export interface SyncResult {
+  /** 是否完成同步 */
+  synced: boolean;
+}
+
+/**
+ * 仓库成员写入项。
+ */
+export interface RepoMemberInput {
+  /** 用户主键 */
+  userId: string;
+  /** 是否合并人 */
+  isMerger: boolean;
+}
+
+/**
+ * 整体覆盖仓库成员的请求。
+ */
+export interface ReplaceRepoMembersInput {
+  /** 目标成员列表 */
+  members: RepoMemberInput[];
+}
+
+/**
+ * 管理员用户列表项。
+ */
+export interface AdminUser {
+  /** 用户主键 */
+  id: string;
+  /** 登录名 */
+  username: string;
+  /** 显示名 */
+  displayName: string;
+  /** 邮箱，可空 */
+  email: string | null;
+  /** 是否管理员 */
+  isAdmin: boolean;
+  /** 是否启用 */
+  isActive: boolean;
+  /** 是否必须修改密码 */
+  mustChangePassword: boolean;
+  /** 创建时间 */
+  createdAt: string;
+  /** 更新时间 */
+  updatedAt: string;
+}
+
+/**
+ * 新建用户请求。
+ */
+export interface CreateUserInput {
+  /** 登录名 */
+  username: string;
+  /** 初始密码，用户首次登录后必须修改 */
+  password: string;
+  /** 显示名 */
+  displayName: string;
+  /** 邮箱，可选 */
+  email?: string;
+  /** 是否管理员 */
+  isAdmin: boolean;
+}
+
+/**
+ * 局部更新用户请求，未提供的字段保持不变。
+ */
+export interface UpdateUserInput {
+  /** 显示名 */
+  displayName?: string;
+  /** 是否管理员 */
+  isAdmin?: boolean;
+  /** 是否启用 */
+  isActive?: boolean;
+}
+
+/**
+ * 重置密码结果。
+ */
+export interface ResetPasswordResult {
+  /** 一次性新密码，仅本次响应返回 */
+  password: string;
+}
+
+/**
+ * 通知列表查询参数。
+ */
+export interface NotificationListQuery {
+  /** 是否只看未读 */
+  unreadOnly?: boolean;
+  /** 页码，从 1 开始 */
+  page?: number;
+  /** 每页条数 */
+  pageSize?: number;
+}
+
+/**
+ * 标记通知已读请求，ids 与 all 至少提供一个。
+ */
+export type MarkNotificationsReadInput = { ids: string[] } | { all: true };
+
+/**
+ * 标记通知已读结果。
+ */
+export interface MarkReadResult {
+  /** 本次实际更新行数 */
+  updated: number;
+}

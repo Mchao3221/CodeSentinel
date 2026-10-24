@@ -2,12 +2,12 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
 import AppLayout from './layouts/AppLayout.vue';
 import LoginView from './views/LoginView.vue';
-import NotificationListView from './views/NotificationListView.vue';
-import RepoListView from './views/RepoListView.vue';
+import NotificationsView from './views/NotificationsView.vue';
+import ReposAdminView from './views/ReposAdminView.vue';
 import ReviewCreateView from './views/ReviewCreateView.vue';
 import ReviewDetailView from './views/ReviewDetailView.vue';
 import ReviewListView from './views/ReviewListView.vue';
-import UserListView from './views/UserListView.vue';
+import UsersAdminView from './views/UsersAdminView.vue';
 import { useAuthStore } from './stores/auth';
 
 declare module 'vue-router' {
@@ -52,19 +52,19 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'repos',
         name: 'repos',
-        component: RepoListView,
+        component: ReposAdminView,
         meta: { requiresAdmin: true },
       },
       {
         path: 'users',
         name: 'users',
-        component: UserListView,
+        component: UsersAdminView,
         meta: { requiresAdmin: true },
       },
       {
         path: 'notifications',
         name: 'notifications',
-        component: NotificationListView,
+        component: NotificationsView,
       },
     ],
   },

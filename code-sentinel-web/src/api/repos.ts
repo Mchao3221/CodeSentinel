@@ -2,7 +2,18 @@
  * 仓库、分支与成员接口。
  */
 import { api } from './client';
-import type { Branch, Paginated, Repo, RepoMember, UnreviewedBranch } from './types';
+import type {
+  Branch,
+  CreateRepoInput,
+  Paginated,
+  Repo,
+  RepoMember,
+  RepoMemberInput,
+  SyncResult,
+  TestConnectionResult,
+  UnreviewedBranch,
+  UpdateRepoInput,
+} from './types';
 
 /** 仓库下拉一次拉取的最大条数，与后端分页上限一致 */
 const MAX_PAGE_SIZE = 100;
@@ -56,5 +67,65 @@ export async function fetchUnreviewedBranches(repoId: string): Promise<Unreviewe
  */
 export async function fetchRepoMembers(repoId: string): Promise<RepoMember[]> {
   const { data } = await api.get<{ items: RepoMember[] }>(`/api/repos/${repoId}/members`);
+  return data.items;
+}
+
+/**
+ * 新建仓库，后端会先验证远端可连接。
+ * @param input 新建仓库请求
+ * @returns 新建的仓库
+ */
+export async function createRepo(input: CreateRepoInput): Promise<Repo> {
+  const { data } = await api.post<Repo>('/api/repos', input);
+  return data;
+}
+
+/**
+ * 局部更新仓库，未提供的字段保持不变。
+ * @param repoId 仓库主键
+ * @param input 更新请求
+ * @returns 更新后的仓库
+ */
+export async function updateRepo(repoId: string, input: UpdateRepoInput): Promise<Repo> {
+  const { data } = await api.patch<Repo>(`/api/repos/${repoId}`, input);
+  return data;
+}
+
+/**
+ * 使用已保存凭据测试仓库连通性。
+ * @param repoId 仓库主键
+ * @returns 连接测试结果
+ */
+export async function testRepoConnection(repoId: string): Promise<TestConnectionResult> {
+  const { data } = await api.post<TestConnectionResult>(
+    `/api/repos/${repoId}/test-connection`,
+  );
+  return data;
+}
+
+/**
+ * 手动触发一次镜像同步。
+ * @param repoId 仓库主键
+ * @returns 同步结果
+ */
+export async function syncRepo(repoId: string): Promise<SyncResult> {
+  const { data } = await api.post<SyncResult>(`/api/repos/${repoId}/sync`);
+  return data;
+}
+
+/**
+ * 整体覆盖仓库成员与合并人标记。
+ * @param repoId 仓库主键
+ * @param members 目标成员列表
+ * @returns 覆盖后的成员列表
+ */
+export async function replaceRepoMembers(
+  repoId: string,
+  members: RepoMemberInput[],
+): Promise<RepoMember[]> {
+  const { data } = await api.put<{ items: RepoMember[] }>(
+    `/api/repos/${repoId}/members`,
+    { members },
+  );
   return data.items;
 }
