@@ -259,21 +259,24 @@ public static class ReposEndpoints
     }
 
     /// <summary>
-    /// 读取仓库成员与合并人标记，要求仓库成员或管理员身份。
+    /// 读取仓库成员与合并人标记，要求仓库成员或管理员身份；管理员可显式包含已停用成员。
     /// </summary>
     /// <param name="id">仓库主键</param>
+    /// <param name="includeInactive">是否包含已停用成员，仅管理员生效</param>
     /// <param name="db">数据库上下文</param>
     /// <param name="httpContext">HTTP 上下文</param>
     /// <param name="ct">取消令牌</param>
     /// <returns>成员列表</returns>
     private static async Task<IResult> ListMembersAsync(
         Guid id,
+        bool? includeInactive,
         AppDbContext db,
         HttpContext httpContext,
         CancellationToken ct)
     {
         await RepoAccess.EnsureAsync(db, httpContext, id, ct);
-        var items = await LoadMembersAsync(db, id, ct);
+        var withInactive = includeInactive == true && CurrentUser.IsAdmin(httpContext);
+        var items = await LoadMembersAsync(db, id, withInactive, ct);
         return Results.Ok(new RepoMemberListResponse(items));
     }
 
@@ -317,7 +320,7 @@ public static class ReposEndpoints
             diff,
             ct);
 
-        var items = await LoadMembersAsync(db, id, ct);
+        var items = await LoadMembersAsync(db, id, false, ct);
         return Results.Ok(new RepoMemberListResponse(items));
     }
 
@@ -611,23 +614,30 @@ public static class ReposEndpoints
     }
 
     /// <summary>
-    /// 读取仓库成员并附带用户展示信息，排除已停用用户，合并人排在前面。
+    /// 读取仓库成员并附带用户展示信息，合并人排在前面。
     /// </summary>
     /// <param name="db">数据库上下文</param>
     /// <param name="repoId">仓库主键</param>
+    /// <param name="includeInactive">是否包含已停用成员</param>
     /// <param name="ct">取消令牌</param>
     /// <returns>成员列表</returns>
     private static async Task<List<RepoMemberDto>> LoadMembersAsync(
         AppDbContext db,
         Guid repoId,
+        bool includeInactive,
         CancellationToken ct)
     {
         return await (
             from member in db.RepoMembers.AsNoTracking()
             join user in db.Users.AsNoTracking() on member.UserId equals user.Id
-            where member.RepoId == repoId && user.IsActive
+            where member.RepoId == repoId && (includeInactive || user.IsActive)
             orderby member.IsMerger descending, user.Username
-            select new RepoMemberDto(user.Id, user.Username, user.DisplayName, member.IsMerger))
+            select new RepoMemberDto(
+                user.Id,
+                user.Username,
+                user.DisplayName,
+                member.IsMerger,
+                user.IsActive))
             .ToListAsync(ct);
     }
 
@@ -868,7 +878,13 @@ public sealed record RepoDto(
 /// <param name="Username">登录名</param>
 /// <param name="DisplayName">显示名</param>
 /// <param name="IsMerger">是否合并人</param>
-public sealed record RepoMemberDto(Guid UserId, string Username, string DisplayName, bool IsMerger);
+/// <param name="IsActive">用户是否启用</param>
+public sealed record RepoMemberDto(
+    Guid UserId,
+    string Username,
+    string DisplayName,
+    bool IsMerger,
+    bool IsActive);
 
 /// <summary>
 /// 仓库成员列表响应。

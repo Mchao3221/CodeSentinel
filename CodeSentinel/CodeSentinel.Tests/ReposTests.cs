@@ -318,6 +318,14 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
         Assert.NotNull(members);
         Assert.Single(members.Items);
         Assert.Equal(merger.Id, members.Items[0].UserId);
+        Assert.True(members.Items[0].IsActive);
+
+        // 管理员可显式包含停用成员，便于管理页标注“保存后将移除”
+        var withInactive = await admin.GetFromJsonAsync<RepoMemberListBody>(
+            $"/api/repos/{repo.Id}/members?includeInactive=true");
+        Assert.NotNull(withInactive);
+        Assert.Equal(2, withInactive.Items.Count);
+        Assert.False(withInactive.Items.Single(m => m.UserId == reviewer.Id).IsActive);
     }
 
     /// <summary>
@@ -470,7 +478,12 @@ public sealed record RepoListBody(IReadOnlyList<RepoBody> Items, int Total, int 
 /// <param name="Username">登录名</param>
 /// <param name="DisplayName">显示名</param>
 /// <param name="IsMerger">是否合并人</param>
-public sealed record RepoMemberBody(Guid UserId, string Username, string DisplayName, bool IsMerger);
+public sealed record RepoMemberBody(
+    Guid UserId,
+    string Username,
+    string DisplayName,
+    bool IsMerger,
+    bool IsActive);
 
 /// <summary>
 /// 仓库成员列表响应的测试 DTO。
