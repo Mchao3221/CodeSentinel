@@ -26,7 +26,8 @@ public sealed class AnchorService(AppDbContext db, DiffService diffService)
     private const int MaxScanLines = 2000;
 
     /// <summary>
-    /// 把旧版本上的评论重新锚定到新版本。
+    /// 把评审单上所有未解决 NEW 侧评论重新锚定到新版本。
+    /// 评论位置在上一跳已被就地更新到 fromRevision 的 head 坐标，因此逐跳累积映射即可跨多次版本迁移。
     /// </summary>
     /// <param name="reviewId">评审单主键</param>
     /// <param name="fromRevisionId">旧版本主键</param>
@@ -52,9 +53,9 @@ public sealed class AnchorService(AppDbContext db, DiffService diffService)
             return new ReanchorReport(0, 0, 0);
         }
 
+        // 不按 revision_id 过滤：评论的当前位置可能来自更早的版本，需逐跳累积映射
         var comments = await db.Comments
             .Where(m => m.ReviewId == reviewId
-                && m.RevisionId == fromRevisionId
                 && m.Status == CommentStatus.Open
                 && m.Side == NewSide)
             .ToListAsync(ct);

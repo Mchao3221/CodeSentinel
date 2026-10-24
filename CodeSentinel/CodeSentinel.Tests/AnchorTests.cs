@@ -356,6 +356,52 @@ public class AnchorTests
     }
 
     /// <summary>
+    /// 跨两次版本迁移：评论在 rev1 创建，rev2、rev3 各在顶部插行，
+    /// 最终行号累计移动且保持 OPEN，revision_id 仍为创建版本。
+    /// </summary>
+    [Fact]
+    public async Task Comment_stays_anchored_across_multiple_revisions()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedContextAsync(
+            factory,
+            source,
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("one\ntwo\nthree\n") },
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("one\ntwo\nthree\nfour\n") });
+        var client = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var review = await CreateReviewAsync(client, context);
+        var created = await CreateCommentAsync(client, review.Id, "a.txt", "NEW", 3, "第三行评论");
+        var comment = await ReadCommentBodyAsync(created);
+        var originRevisionId = review.Revisions[0].Id;
+
+        // 第二跳：顶部插入 zero，评论从第 3 行移动到第 4 行
+        var head2 = await source.CommitChangesAsync(
+            HeadBranch,
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("zero\none\ntwo\nthree\nfour\n") });
+        await FetchMirrorAsync(factory, context.Repo);
+        await AddRevisionAsync(factory, review.Id, head2);
+
+        // 第三跳：再插入 minus，评论应累计移动到第 5 行
+        var head3 = await source.CommitChangesAsync(
+            HeadBranch,
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("minus\nzero\none\ntwo\nthree\nfour\n") });
+        await FetchMirrorAsync(factory, context.Repo);
+        await AddRevisionAsync(factory, review.Id, head3);
+
+        var stored = await ReadCommentAsync(factory, comment.Id);
+        Assert.Equal(5, stored.LineNumber);
+        Assert.Equal(CommentStatus.Open, stored.Status);
+        Assert.Equal(originRevisionId, stored.RevisionId);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Assert.Equal(
+            3,
+            await db.ReviewRevisions.AsNoTracking().CountAsync(m => m.ReviewId == review.Id));
+    }
+
+    /// <summary>
     /// RevisionService 创建新版本后应自动触发重新定位，评论行号随之更新。
     /// </summary>
     [Fact]
@@ -582,6 +628,24 @@ public class AnchorTests
         var service = scope.ServiceProvider.GetRequiredService<AnchorService>();
         return await service.ReanchorAsync(
             reviewId, fromRevisionId, toRevisionId, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// 直接调用 RevisionService 追加新版本，走完整的版本创建与重新定位链路。
+    /// </summary>
+    /// <param name="factory">测试宿主工厂</param>
+    /// <param name="reviewId">评审单主键</param>
+    /// <param name="newHeadSha">新 head 提交</param>
+    /// <returns></returns>
+    private static async Task AddRevisionAsync(
+        TestAppFactory factory,
+        Guid reviewId,
+        string newHeadSha)
+    {
+        using var scope = factory.Services.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<RevisionService>();
+        Assert.True(await service.AddRevisionAsync(
+            reviewId, newHeadSha, CancellationToken.None));
     }
 
     /// <summary>
