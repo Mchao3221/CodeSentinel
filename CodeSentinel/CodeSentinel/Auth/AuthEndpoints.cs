@@ -21,6 +21,16 @@ public static class AuthEndpoints
     public const string LoginAction = "LOGIN";
 
     /// <summary>
+    /// 修改自己的密码审计动作标识。
+    /// </summary>
+    public const string PasswordChangedAction = "PASSWORD_CHANGED";
+
+    /// <summary>
+    /// 审计目标类型：用户。
+    /// </summary>
+    public const string UserTargetType = "USER";
+
+    /// <summary>
     /// 映射认证端点。
     /// </summary>
     /// <param name="app">端点路由构建器</param>
@@ -40,8 +50,8 @@ public static class AuthEndpoints
         app.MapGet("/auth/me", GetMeAsync).RequireAuthorization();
 
         app.MapPost("/auth/change-password", (ChangePasswordRequest request, AppDbContext db,
-            PasswordAuthService authService, HttpContext httpContext, CancellationToken ct) =>
-            ChangePasswordAsync(request, db, authService, httpContext, sessionHours, ct))
+            PasswordAuthService authService, AuditService auditService, HttpContext httpContext, CancellationToken ct) =>
+            ChangePasswordAsync(request, db, authService, auditService, httpContext, sessionHours, ct))
             .RequireAuthorization();
 
         app.MapGet("/auth/csrf", (HttpContext httpContext, IAntiforgery antiforgery) =>
@@ -124,6 +134,7 @@ public static class AuthEndpoints
         ChangePasswordRequest request,
         AppDbContext db,
         PasswordAuthService authService,
+        AuditService auditService,
         HttpContext httpContext,
         int sessionHours,
         CancellationToken ct)
@@ -144,6 +155,7 @@ public static class AuthEndpoints
 
         user.PasswordHash = authService.HashPassword(user, request.NewPassword!);
         user.MustChangePassword = false;
+        auditService.Add(user.Id, PasswordChangedAction, UserTargetType, user.Id, null);
         await db.SaveChangesAsync(ct);
 
         // 重新签发 Cookie，让强制改密标记立即失效
@@ -161,6 +173,25 @@ public static class AuthEndpoints
     /// <returns></returns>
     private static async Task SignInAsync(HttpContext httpContext, User user, int sessionHours)
     {
+        var properties = new AuthenticationProperties
+        {
+            IsPersistent = false,
+            ExpiresUtc = DateTimeOffset.UtcNow.AddHours(sessionHours)
+        };
+
+        await httpContext.SignInAsync(
+            CookieAuthenticationDefaults.AuthenticationScheme,
+            BuildPrincipal(user),
+            properties);
+    }
+
+    /// <summary>
+    /// 按用户信息构建认证主体，供登录签发与会话刷新共用。
+    /// </summary>
+    /// <param name="user">用户</param>
+    /// <returns>认证主体</returns>
+    public static ClaimsPrincipal BuildPrincipal(User user)
+    {
         var claims = new List<Claim>
         {
             new(ClaimTypes.NameIdentifier, user.Id.ToString()),
@@ -175,16 +206,7 @@ public static class AuthEndpoints
         }
 
         var identity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
-        var properties = new AuthenticationProperties
-        {
-            IsPersistent = false,
-            ExpiresUtc = DateTimeOffset.UtcNow.AddHours(sessionHours)
-        };
-
-        await httpContext.SignInAsync(
-            CookieAuthenticationDefaults.AuthenticationScheme,
-            new ClaimsPrincipal(identity),
-            properties);
+        return new ClaimsPrincipal(identity);
     }
 
     /// <summary>

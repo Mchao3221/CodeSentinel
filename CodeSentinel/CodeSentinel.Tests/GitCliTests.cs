@@ -135,6 +135,20 @@ public class GitCliTests
     }
 
     /// <summary>
+    /// 凭据的 ToString 必须脱敏密码，避免意外进入日志或错误信息。
+    /// </summary>
+    [Fact]
+    public void Credentials_to_string_redacts_password()
+    {
+        var credentials = new GitCredentials("ci-user", "super-secret-password");
+
+        var text = credentials.ToString();
+
+        Assert.DoesNotContain("super-secret-password", text, StringComparison.Ordinal);
+        Assert.Contains("ci-user", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// 构造只包含 git 可执行文件名的配置。
     /// </summary>
     /// <returns>配置对象</returns>

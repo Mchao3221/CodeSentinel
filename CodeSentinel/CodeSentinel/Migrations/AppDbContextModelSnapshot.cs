@@ -134,6 +134,8 @@ namespace CodeSentinel.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("ReviewId");
+
                     b.ToTable("comments", (string)null);
                 });
 
@@ -175,6 +177,10 @@ namespace CodeSentinel.Migrations
                         .HasColumnName("user_id");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("UserId", "CreatedAt");
+
+                    b.HasIndex("UserId", "ReadAt");
 
                     b.ToTable("notifications", (string)null);
                 });
@@ -277,6 +283,8 @@ namespace CodeSentinel.Migrations
                         .HasColumnName("user_id");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("UserId");
 
                     b.HasIndex("RepoId", "UserId")
                         .IsUnique();

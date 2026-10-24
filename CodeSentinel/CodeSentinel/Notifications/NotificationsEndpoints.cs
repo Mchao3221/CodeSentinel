@@ -4,6 +4,7 @@ using CodeSentinel.Common;
 using CodeSentinel.Data;
 using CodeSentinel.Data.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSentinel.Notifications;
 
@@ -12,9 +13,6 @@ namespace CodeSentinel.Notifications;
 /// </summary>
 public static class NotificationsEndpoints
 {
-    private const int DefaultPageSize = 20;
-    private const int MaxPageSize = 100;
-
     /// <summary>
     /// 映射通知端点，全部要求登录；非 GET 请求由全局 CSRF 过滤器校验令牌。
     /// </summary>
@@ -44,13 +42,13 @@ public static class NotificationsEndpoints
         int? pageSize,
         AppDbContext db,
         HttpContext httpContext,
+        ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
         var userId = CurrentUser.RequireId(httpContext);
-        var currentPage = page is > 0 ? page.Value : 1;
-        var currentPageSize = pageSize is > 0
-            ? Math.Min(pageSize.Value, MaxPageSize)
-            : DefaultPageSize;
+        var currentPage = Pagination.NormalizePage(page);
+        var currentPageSize = Pagination.NormalizePageSize(pageSize);
+        var logger = loggerFactory.CreateLogger("CodeSentinel.Notifications.NotificationsEndpoints");
 
         var query = db.Notifications.AsNoTracking().Where(m => m.UserId == userId);
         if (unreadOnly == true)
@@ -70,7 +68,7 @@ public static class NotificationsEndpoints
                 m.Id,
                 m.Type,
                 m.ReviewId,
-                ParsePayload(m.PayloadJson),
+                ParsePayload(m.PayloadJson, logger),
                 m.ReadAt,
                 m.CreatedAt))
             .ToList();
@@ -200,8 +198,18 @@ public static class NotificationsEndpoints
             throw InvalidBody();
         }
 
-        var body = JsonSerializer.Deserialize<MarkReadRequest>(
-            raw, JsonSerializerOptions.Web);
+        MarkReadRequest? body;
+        try
+        {
+            body = JsonSerializer.Deserialize<MarkReadRequest>(
+                raw, JsonSerializerOptions.Web);
+        }
+        catch (JsonException)
+        {
+            // 非法 JSON 属于请求体不合法，而不是服务器错误
+            throw InvalidBody();
+        }
+
         if (body is null || (body.All is null && body.Ids is null))
         {
             throw InvalidBody();
@@ -211,14 +219,25 @@ public static class NotificationsEndpoints
     }
 
     /// <summary>
-    /// 把 payload JSON 文本解析为可嵌套输出的 JSON 元素。
+    /// 把 payload JSON 文本解析为可嵌套输出的 JSON 元素，损坏时回退为空对象并记录日志。
     /// </summary>
     /// <param name="payloadJson">payload JSON 文本</param>
+    /// <param name="logger">日志记录器</param>
     /// <returns>JSON 元素</returns>
-    private static JsonElement ParsePayload(string payloadJson)
+    private static JsonElement ParsePayload(string payloadJson, ILogger logger)
     {
-        using var document = JsonDocument.Parse(payloadJson);
-        return document.RootElement.Clone();
+        try
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            return document.RootElement.Clone();
+        }
+        catch (JsonException ex)
+        {
+            // 单条通知的 payload 损坏不应拖垮整个列表，降级为空对象
+            logger.LogWarning(ex, "通知 payload 解析失败，回退为空对象");
+            using var empty = JsonDocument.Parse("{}");
+            return empty.RootElement.Clone();
+        }
     }
 
     /// <summary>

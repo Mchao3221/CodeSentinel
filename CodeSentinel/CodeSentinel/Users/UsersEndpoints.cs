@@ -1,9 +1,11 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using CodeSentinel.Audit;
 using CodeSentinel.Auth;
 using CodeSentinel.Common;
 using CodeSentinel.Data;
 using CodeSentinel.Data.Entities;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSentinel.Users;
@@ -13,8 +15,22 @@ namespace CodeSentinel.Users;
 /// </summary>
 public static class UsersEndpoints
 {
-    private const int DefaultPageSize = 20;
-    private const int MaxPageSize = 100;
+    /// <summary>
+    /// 创建用户审计动作。
+    /// </summary>
+    public const string UserCreatedAction = "USER_CREATED";
+
+    /// <summary>
+    /// 更新用户审计动作。
+    /// </summary>
+    public const string UserUpdatedAction = "USER_UPDATED";
+
+    /// <summary>
+    /// 重置密码审计动作。
+    /// </summary>
+    public const string PasswordResetAction = "PASSWORD_RESET";
+
+    private const string UserTargetType = "USER";
     private const int ResetPasswordLength = 16;
     private const int MaxUsernameLength = 64;
     private const int MaxDisplayNameLength = 100;
@@ -57,8 +73,8 @@ public static class UsersEndpoints
         AppDbContext db,
         CancellationToken ct)
     {
-        var currentPage = page is > 0 ? page.Value : 1;
-        var currentPageSize = Math.Clamp(pageSize ?? DefaultPageSize, 1, MaxPageSize);
+        var currentPage = Pagination.NormalizePage(page);
+        var currentPageSize = Pagination.NormalizePageSize(pageSize);
         var query = db.Users.AsNoTracking().OrderByDescending(m => m.UpdatedAt).ThenBy(m => m.Username);
 
         var total = await query.CountAsync(ct);
@@ -83,6 +99,8 @@ public static class UsersEndpoints
         CreateUserRequest request,
         AppDbContext db,
         PasswordAuthService authService,
+        AuditService auditService,
+        HttpContext httpContext,
         CancellationToken ct)
     {
         var username = request.Username?.Trim() ?? string.Empty;
@@ -109,7 +127,13 @@ public static class UsersEndpoints
         user.PasswordHash = authService.HashPassword(user, request.Password!);
 
         db.Users.Add(user);
-        await db.SaveChangesAsync(ct);
+        auditService.Add(
+            CurrentUser.Id(httpContext),
+            UserCreatedAction,
+            UserTargetType,
+            user.Id,
+            new { user.Username });
+        await SaveUserSafeAsync(db, ct);
 
         return Results.Created($"/api/users/{user.Id}", ToUserResponse(user));
     }
@@ -126,16 +150,24 @@ public static class UsersEndpoints
         Guid id,
         PatchUserRequest request,
         AppDbContext db,
+        AuditService auditService,
+        HttpContext httpContext,
         CancellationToken ct)
     {
         var user = await db.Users.FirstOrDefaultAsync(m => m.Id == id, ct)
             ?? throw new ApiException(StatusCodes.Status404NotFound, "NOT_FOUND", "用户不存在");
 
         ValidatePatchRequest(request);
+        var changes = new List<string>();
 
         if (request.DisplayName is not null)
         {
-            user.DisplayName = request.DisplayName.Trim();
+            var displayName = request.DisplayName.Trim();
+            if (displayName != user.DisplayName)
+            {
+                user.DisplayName = displayName;
+                changes.Add("displayName");
+            }
         }
 
         var deactivating = request.IsActive == false && user.IsActive;
@@ -153,14 +185,16 @@ public static class UsersEndpoints
             }
         }
 
-        if (request.IsAdmin is not null)
+        if (request.IsAdmin is not null && request.IsAdmin.Value != user.IsAdmin)
         {
             user.IsAdmin = request.IsAdmin.Value;
+            changes.Add("isAdmin");
         }
 
-        if (request.IsActive is not null)
+        if (request.IsActive is not null && request.IsActive.Value != user.IsActive)
         {
             user.IsActive = request.IsActive.Value;
+            changes.Add("isActive");
         }
 
         if (deactivating)
@@ -168,6 +202,12 @@ public static class UsersEndpoints
             await RemoveReviewerFromActiveReviewsAsync(db, user, ct);
         }
 
+        auditService.Add(
+            CurrentUser.Id(httpContext),
+            UserUpdatedAction,
+            UserTargetType,
+            user.Id,
+            new { changed = changes });
         await db.SaveChangesAsync(ct);
         return Results.Ok(ToUserResponse(user));
     }
@@ -184,6 +224,8 @@ public static class UsersEndpoints
         Guid id,
         AppDbContext db,
         PasswordAuthService authService,
+        AuditService auditService,
+        HttpContext httpContext,
         CancellationToken ct)
     {
         var user = await db.Users.FirstOrDefaultAsync(m => m.Id == id, ct)
@@ -192,6 +234,12 @@ public static class UsersEndpoints
         var newPassword = RandomNumberGenerator.GetString(ResetPasswordAlphabet, ResetPasswordLength);
         user.PasswordHash = authService.HashPassword(user, newPassword);
         user.MustChangePassword = true;
+        auditService.Add(
+            CurrentUser.Id(httpContext),
+            PasswordResetAction,
+            UserTargetType,
+            user.Id,
+            new { targetUsername = user.Username });
         await db.SaveChangesAsync(ct);
 
         return Results.Ok(new { password = newPassword });
@@ -316,6 +364,24 @@ public static class UsersEndpoints
     {
         var normalized = username.ToLowerInvariant();
         return db.Users.AnyAsync(m => m.Username.ToLower() == normalized, ct);
+    }
+
+    /// <summary>
+    /// 保存用户，唯一索引冲突时翻译为 409，覆盖并发创建同名用户的竞态。
+    /// </summary>
+    /// <param name="db">数据库上下文</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>保存任务</returns>
+    private static async Task SaveUserSafeAsync(AppDbContext db, CancellationToken ct)
+    {
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is SqliteException { SqliteErrorCode: 19 })
+        {
+            throw new ApiException(StatusCodes.Status409Conflict, "USERNAME_EXISTS", "用户名已存在");
+        }
     }
 
     /// <summary>

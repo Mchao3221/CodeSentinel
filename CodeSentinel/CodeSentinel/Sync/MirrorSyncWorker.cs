@@ -185,11 +185,9 @@ public sealed class MirrorSyncWorker : BackgroundService
             ApplySuccess(repo);
             await db.SaveChangesAsync(ct);
 
-            // 版本同步成功后再检测合并与分支删除，避免用旧分支信息误判
-            if (await SyncActiveReviewsSafelyAsync(revisionService, repo, ct))
-            {
-                await SyncMergeStatesSafelyAsync(mergeDetectionService, repo, ct);
-            }
+            // 版本同步与合并检测各自用安全包装：fetch 已成功，版本同步失败不应阻止合并检测
+            await SyncActiveReviewsSafelyAsync(revisionService, repo, ct);
+            await SyncMergeStatesSafelyAsync(mergeDetectionService, repo, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

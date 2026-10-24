@@ -39,4 +39,13 @@ public sealed record GitCredentials(string Username, string Password)
         var defaultUsername = kind == RepoCredentialKind.Token ? TokenUsername : DefaultUsername;
         return new GitCredentials(defaultUsername, secret);
     }
+
+    /// <summary>
+    /// 输出脱敏后的凭据描述，避免密码或令牌进入日志与错误信息。
+    /// </summary>
+    /// <returns>脱敏描述</returns>
+    public override string ToString()
+    {
+        return $"GitCredentials {{ Username = {Username}, Password = *** }}";
+    }
 }

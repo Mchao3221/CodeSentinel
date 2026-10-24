@@ -14,9 +14,6 @@ namespace CodeSentinel.Reviews;
 /// </summary>
 public static class ReviewsEndpoints
 {
-    private const int DefaultPageSize = 20;
-    private const int MaxPageSize = 100;
-
     /// <summary>
     /// 映射评审单端点，全部要求登录。
     /// </summary>
@@ -256,8 +253,8 @@ public static class ReviewsEndpoints
     {
         var userId = CurrentUser.RequireId(httpContext);
         var isAdmin = CurrentUser.IsAdmin(httpContext);
-        var currentPage = page is > 0 ? page.Value : 1;
-        var currentPageSize = Math.Clamp(pageSize ?? DefaultPageSize, 1, MaxPageSize);
+        var currentPage = Pagination.NormalizePage(page);
+        var currentPageSize = Pagination.NormalizePageSize(pageSize);
         var query = BuildListQuery(
             db, userId, isAdmin, ParseScope(scope), repoId, ParseStatus(status));
 

@@ -171,4 +171,52 @@ public class AuthTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
             Assert.Equal(factory.AdminUserId, log.TargetId);
         });
     }
+
+    /// <summary>
+    /// 登录后被停用的用户，其下一次请求应立刻返回 401，无需重新登录即失效。
+    /// </summary>
+    [Fact]
+    public async Task Deactivated_user_is_rejected_on_next_request()
+    {
+        var user = factory.SeedUser("session-deactivate", "Passw0rd!");
+        var client = await factory.LoginAsync(user.Username, "Passw0rd!");
+
+        var me = await client.GetAsync("/api/auth/me");
+        Assert.Equal(HttpStatusCode.OK, me.StatusCode);
+
+        var admin = await factory.LoginAsAdminAsync();
+        var patch = await admin.PatchJsonWithCsrfAsync(
+            $"/api/users/{user.Id}", new { isActive = false });
+        Assert.Equal(HttpStatusCode.OK, patch.StatusCode);
+
+        var blocked = await client.GetAsync("/api/auth/me");
+        var body = await blocked.Content.ReadFromJsonAsync<ErrorBody>();
+        Assert.Equal(HttpStatusCode.Unauthorized, blocked.StatusCode);
+        Assert.NotNull(body);
+        Assert.Equal("UNAUTHENTICATED", body.Code);
+    }
+
+    /// <summary>
+    /// 管理员被降级后，其已签发的 Cookie 应立即失去管理员权限。
+    /// </summary>
+    [Fact]
+    public async Task Demoted_admin_loses_access_immediately()
+    {
+        var demotee = factory.SeedUser("demotee-admin", "Passw0rd!", isAdmin: true);
+        var client = await factory.LoginAsync(demotee.Username, "Passw0rd!");
+
+        var allowed = await client.GetAsync("/api/users");
+        Assert.Equal(HttpStatusCode.OK, allowed.StatusCode);
+
+        var admin = await factory.LoginAsAdminAsync();
+        var patch = await admin.PatchJsonWithCsrfAsync(
+            $"/api/users/{demotee.Id}", new { isAdmin = false });
+        Assert.Equal(HttpStatusCode.OK, patch.StatusCode);
+
+        var denied = await client.GetAsync("/api/users");
+        var body = await denied.Content.ReadFromJsonAsync<ErrorBody>();
+        Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+        Assert.NotNull(body);
+        Assert.Equal("FORBIDDEN", body.Code);
+    }
 }

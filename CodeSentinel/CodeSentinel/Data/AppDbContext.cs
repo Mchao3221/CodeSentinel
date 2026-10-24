@@ -203,6 +203,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(m => m.CreatedAt).HasColumnName("created_at");
             entity.Property(m => m.UpdatedAt).HasColumnName("updated_at");
             entity.HasIndex(m => new { m.RepoId, m.UserId }).IsUnique();
+            entity.HasIndex(m => m.UserId);
         });
     }
 
@@ -342,6 +343,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(m => m.ResolvedAt).HasColumnName("resolved_at");
             entity.Property(m => m.CreatedAt).HasColumnName("created_at");
             entity.Property(m => m.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(m => m.ReviewId);
         });
     }
 
@@ -387,6 +389,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(m => m.ReadAt).HasColumnName("read_at");
             entity.Property(m => m.CreatedAt).HasColumnName("created_at");
             entity.Property(m => m.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(m => new { m.UserId, m.CreatedAt });
+            entity.HasIndex(m => new { m.UserId, m.ReadAt });
         });
     }
 

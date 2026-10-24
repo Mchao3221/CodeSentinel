@@ -17,6 +17,10 @@ public sealed class PasswordAuthService(AppDbContext db)
     /// </summary>
     public const int MinPasswordLength = 8;
 
+    private static readonly User dummyUser = new() { Username = "timing-equalizer" };
+    private static readonly string dummyHash =
+        new PasswordHasher<User>().HashPassword(dummyUser, "dummy-password-for-timing");
+
     private readonly PasswordHasher<User> passwordHasher = new();
 
     /// <summary>
@@ -40,6 +44,8 @@ public sealed class PasswordAuthService(AppDbContext db)
 
         if (user is null)
         {
+            // 用户不存在时仍执行一次哈希校验，避免用响应时间泄露用户是否存在
+            _ = passwordHasher.VerifyHashedPassword(dummyUser, dummyHash, password);
             return null;
         }
 

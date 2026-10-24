@@ -31,8 +31,6 @@ public static class ReposEndpoints
 
     private const string RepoTargetType = "REPO";
     private const string TestingEnvironment = "Testing";
-    private const int DefaultPageSize = 20;
-    private const int MaxPageSize = 100;
     private const int DefaultSyncIntervalSeconds = 300;
     private const int MaxNameLength = 100;
     private const int MaxBaseBranchLength = 200;
@@ -73,8 +71,8 @@ public static class ReposEndpoints
     {
         var userId = CurrentUser.RequireId(httpContext);
         var isAdmin = CurrentUser.IsAdmin(httpContext);
-        var currentPage = page is > 0 ? page.Value : 1;
-        var currentPageSize = Math.Clamp(pageSize ?? DefaultPageSize, 1, MaxPageSize);
+        var currentPage = Pagination.NormalizePage(page);
+        var currentPageSize = Pagination.NormalizePageSize(pageSize);
 
         var query = db.Repos.AsNoTracking();
         if (!isAdmin)

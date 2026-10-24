@@ -83,6 +83,9 @@ builder.Services
         options.ExpireTimeSpan = TimeSpan.FromHours(sessionHours);
         options.SlidingExpiration = false;
 
+        // 每次请求核对数据库中的用户状态，停用立即失效，降级与重置密码即时刷新
+        options.Events.OnValidatePrincipal = SessionValidator.ValidateAsync;
+
         // 接口不跳转登录页，统一返回错误形状
         options.Events.OnRedirectToLogin = context => WriteAuthErrorAsync(
             context.HttpContext,

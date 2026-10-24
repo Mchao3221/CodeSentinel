@@ -1,11 +1,14 @@
 # 构建产物
 bin/
 obj/
+TestResults/
+*.trx
 
 # 运行时数据（逐项忽略：Windows 下忽略规则大小写不敏感，整目录写 data/ 会误伤源码 Data/）
 /CodeSentinel/CodeSentinel/data/*.db
 /CodeSentinel/CodeSentinel/data/*.db-shm
 /CodeSentinel/CodeSentinel/data/*.db-wal
+/CodeSentinel/CodeSentinel/data/*.db-journal
 /CodeSentinel/CodeSentinel/data/mirrors/
 /CodeSentinel/CodeSentinel/data/keys/
 /CodeSentinel/CodeSentinel/data/init-admin-token.txt

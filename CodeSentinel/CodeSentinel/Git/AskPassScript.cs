@@ -51,6 +51,10 @@ public sealed class AskPassScript : IDisposable
     {
         var root = rootDirectory
             ?? Path.Combine(Path.GetTempPath(), "codesentinel-askpass");
+        Directory.CreateDirectory(root);
+        // 尽力收紧根目录权限，避免其它用户读到脚本
+        SetOwnerOnlyMode(root);
+
         var directory = Path.Combine(root, Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         SetOwnerOnlyMode(directory);

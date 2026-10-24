@@ -312,6 +312,40 @@ public class MergeDetectionTests
     }
 
     /// <summary>
+    /// 审核人撤回结论使评审单从通过回退时，应清空旧的合并提示，避免过期 squash 提示再次出现。
+    /// </summary>
+    [Fact]
+    public async Task Withdrawal_resets_merge_hint()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedContextAsync(factory, source);
+        var submitter = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var reviewer = await factory.LoginAsync(context.ReviewerA.Username, TestPassword);
+        var review = await CreateReviewAsync(
+            submitter, context.Repo.Id, "撤回清空提示", [context.ReviewerA.Id]);
+        await ApproveAllAsync(reviewer, null, review.Id);
+
+        for (var sync = 0; sync < 3; sync++)
+        {
+            await SyncMergeStatesAsync(factory, context.Repo.Id);
+        }
+
+        var hinted = await ReadReviewAsync(factory, review.Id);
+        Assert.True(hinted.MergeHint);
+        Assert.Equal(3, hinted.MergeHintCount);
+
+        var withdraw = await reviewer.PostJsonWithCsrfAsync(
+            $"/api/reviews/{review.Id}/decisions", new { state = "PENDING", note = (string?)null });
+        Assert.Equal(HttpStatusCode.OK, withdraw.StatusCode);
+
+        var stored = await ReadReviewAsync(factory, review.Id);
+        Assert.Equal(ReviewStatus.Open, stored.Status);
+        Assert.False(stored.MergeHint);
+        Assert.Equal(0, stored.MergeHintCount);
+    }
+
+    /// <summary>
     /// 后台同步 fetch 成功后应自动检测已合并的评审单。
     /// </summary>
     [Fact]

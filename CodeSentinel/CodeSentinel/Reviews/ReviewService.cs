@@ -504,6 +504,8 @@ public sealed class ReviewService(
             .ExecuteUpdateAsync(m => m
                 .SetProperty(r => r.Status, next)
                 .SetProperty(r => r.ApprovedAt, approvedAt)
+                .SetProperty(r => r.MergeHint, false)
+                .SetProperty(r => r.MergeHintCount, 0)
                 .SetProperty(r => r.UpdatedAt, now), ct);
 
         return affected > 0;
