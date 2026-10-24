@@ -284,6 +284,43 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
     }
 
     /// <summary>
+    /// 停用用户后，成员列表应排除该用户，避免其继续出现在审核人候选中。
+    /// </summary>
+    [Fact]
+    public async Task Members_list_excludes_inactive_users()
+    {
+        using var source = await TestGitRepo.CreateAsync();
+        var merger = factory.SeedUser(UniqueName("active-merger"), TestPassword);
+        var reviewer = factory.SeedUser(UniqueName("inactive-reviewer"), TestPassword);
+        var admin = await factory.LoginAsAdminAsync();
+        var repo = await CreateRepoAsync(admin, UniqueName("inactive-member"), source.Url);
+
+        var put = await admin.PutJsonWithCsrfAsync(
+            $"/api/repos/{repo.Id}/members",
+            new
+            {
+                members = new[]
+                {
+                    new { userId = merger.Id, isMerger = true },
+                    new { userId = reviewer.Id, isMerger = false }
+                }
+            });
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+
+        var deactivate = await admin.PatchJsonWithCsrfAsync(
+            $"/api/users/{reviewer.Id}",
+            new { isActive = false });
+        Assert.Equal(HttpStatusCode.OK, deactivate.StatusCode);
+
+        var members = await admin.GetFromJsonAsync<RepoMemberListBody>(
+            $"/api/repos/{repo.Id}/members");
+
+        Assert.NotNull(members);
+        Assert.Single(members.Items);
+        Assert.Equal(merger.Id, members.Items[0].UserId);
+    }
+
+    /// <summary>
     /// 修改仓库字段、停用仓库并用空串清空凭据。
     /// </summary>
     [Fact]

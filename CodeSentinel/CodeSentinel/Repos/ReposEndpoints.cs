@@ -611,7 +611,7 @@ public static class ReposEndpoints
     }
 
     /// <summary>
-    /// 读取仓库成员并附带用户展示信息，合并人排在前面。
+    /// 读取仓库成员并附带用户展示信息，排除已停用用户，合并人排在前面。
     /// </summary>
     /// <param name="db">数据库上下文</param>
     /// <param name="repoId">仓库主键</param>
@@ -625,7 +625,7 @@ public static class ReposEndpoints
         return await (
             from member in db.RepoMembers.AsNoTracking()
             join user in db.Users.AsNoTracking() on member.UserId equals user.Id
-            where member.RepoId == repoId
+            where member.RepoId == repoId && user.IsActive
             orderby member.IsMerger descending, user.Username
             select new RepoMemberDto(user.Id, user.Username, user.DisplayName, member.IsMerger))
             .ToListAsync(ct);
