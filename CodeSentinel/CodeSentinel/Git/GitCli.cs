@@ -48,6 +48,17 @@ public sealed class GitCli
     public Func<AskPassScript> AskPassFactory { get; init; } = () => AskPassScript.Create();
 
     /// <summary>
+    /// 验证 git 命令可用，供应用启动自检使用。
+    /// </summary>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>git --version 是否执行成功</returns>
+    public async Task<bool> VerifyAvailableAsync(CancellationToken ct)
+    {
+        var result = await RunAsync(Path.GetTempPath(), ["--version"], null, ct);
+        return result.ExitCode == 0;
+    }
+
+    /// <summary>
     /// 执行一条 git 命令并异步收集输出。
     /// </summary>
     /// <param name="workDir">工作目录，不存在时自动创建</param>

@@ -111,6 +111,49 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>
     }
 
     /// <summary>
+    /// 直接写入一个仓库，供同步与分支测试准备数据。
+    /// </summary>
+    /// <param name="gitUrl">仓库地址</param>
+    /// <param name="name">仓库名称</param>
+    /// <param name="defaultBaseBranch">默认目标分支</param>
+    /// <param name="syncIntervalSeconds">同步间隔（秒）</param>
+    /// <param name="isActive">是否启用</param>
+    /// <param name="lastFetchedAt">最近同步时间，未提供表示从未同步</param>
+    /// <param name="nextAttemptAt">下次重试时间，未提供表示无退避</param>
+    /// <param name="failureCount">连续失败次数</param>
+    /// <returns>写入的仓库</returns>
+    public Repo SeedRepo(
+        string gitUrl,
+        string name,
+        string defaultBaseBranch = "main",
+        int syncIntervalSeconds = 300,
+        bool isActive = true,
+        DateTime? lastFetchedAt = null,
+        DateTime? nextAttemptAt = null,
+        int failureCount = 0)
+    {
+        using var scope = Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        var repo = new Repo
+        {
+            Id = Guid.NewGuid(),
+            Name = name,
+            GitUrl = gitUrl,
+            DefaultBaseBranch = defaultBaseBranch,
+            SyncIntervalSeconds = syncIntervalSeconds,
+            IsActive = isActive,
+            LastFetchedAt = lastFetchedAt,
+            NextAttemptAt = nextAttemptAt,
+            FailureCount = failureCount
+        };
+
+        db.Repos.Add(repo);
+        db.SaveChanges();
+        return repo;
+    }
+
+    /// <summary>
     /// 测试数据库文件路径。
     /// </summary>
     public string DatabasePath => _databasePath;

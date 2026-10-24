@@ -58,6 +58,16 @@ public class Repo : IAuditableEntity
     public string? LastError { get; set; }
 
     /// <summary>
+    /// 连续同步失败次数，成功后清零。
+    /// </summary>
+    public int FailureCount { get; set; }
+
+    /// <summary>
+    /// 下次允许重试的时间（UTC），用于失败退避。
+    /// </summary>
+    public DateTime? NextAttemptAt { get; set; }
+
+    /// <summary>
     /// 是否启用，停用后不再同步。
     /// </summary>
     public bool IsActive { get; set; } = true;

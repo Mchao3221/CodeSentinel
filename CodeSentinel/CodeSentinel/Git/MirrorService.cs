@@ -57,6 +57,16 @@ public sealed class MirrorService
     }
 
     /// <summary>
+    /// 判断仓库镜像是否已存在且完成 git init，供只读分支查询使用。
+    /// </summary>
+    /// <param name="repoId">仓库主键</param>
+    /// <returns>镜像是否可用</returns>
+    public bool IsMirrorReady(Guid repoId)
+    {
+        return IsInitialized(GetMirrorPath(repoId));
+    }
+
+    /// <summary>
     /// 用 git ls-remote 验证远端连通性与凭据，失败时抛出 REPO_UNREACHABLE。
     /// </summary>
     /// <param name="url">仓库地址</param>
@@ -211,6 +221,39 @@ public sealed class MirrorService
             1 => false,
             _ => throw GitFailed(result, "判断提交祖先关系失败")
         };
+    }
+
+    /// <summary>
+    /// 统计 descendant 相对 ancestor 领先的提交数，对应 git rev-list --count ancestor..descendant。
+    /// </summary>
+    /// <param name="repoId">仓库主键</param>
+    /// <param name="ancestor">基准提交</param>
+    /// <param name="descendant">领先提交</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>领先的提交数</returns>
+    public async Task<int> CountAheadAsync(
+        Guid repoId,
+        string ancestor,
+        string descendant,
+        CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ancestor);
+        ArgumentException.ThrowIfNullOrWhiteSpace(descendant);
+
+        var result = await _git.RunAsync(
+            GetMirrorPath(repoId),
+            ["rev-list", "--count", $"{ancestor}..{descendant}"],
+            null,
+            ct);
+
+        EnsureSucceeded(result, "统计分支领先提交数失败", null);
+
+        if (!int.TryParse(result.StdOut.Trim(), out var count))
+        {
+            throw GitFailed(result, "无法解析分支领先提交数");
+        }
+
+        return count;
     }
 
     /// <summary>

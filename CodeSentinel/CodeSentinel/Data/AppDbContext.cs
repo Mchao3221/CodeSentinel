@@ -177,6 +177,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(m => m.SyncIntervalSeconds).HasColumnName("sync_interval_seconds");
             entity.Property(m => m.LastFetchedAt).HasColumnName("last_fetched_at");
             entity.Property(m => m.LastError).HasColumnName("last_error");
+            entity.Property(m => m.FailureCount).HasColumnName("failure_count");
+            entity.Property(m => m.NextAttemptAt).HasColumnName("next_attempt_at");
             entity.Property(m => m.IsActive).HasColumnName("is_active");
             entity.Property(m => m.CreatedAt).HasColumnName("created_at");
             entity.Property(m => m.UpdatedAt).HasColumnName("updated_at");

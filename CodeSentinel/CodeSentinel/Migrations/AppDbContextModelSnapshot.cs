@@ -203,6 +203,10 @@ namespace CodeSentinel.Migrations
                         .HasColumnType("varchar(200)")
                         .HasColumnName("default_base_branch");
 
+                    b.Property<int>("FailureCount")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("failure_count");
+
                     b.Property<string>("GitUrl")
                         .IsRequired()
                         .HasColumnType("varchar(500)")
@@ -224,6 +228,10 @@ namespace CodeSentinel.Migrations
                         .IsRequired()
                         .HasColumnType("varchar(100)")
                         .HasColumnName("name");
+
+                    b.Property<DateTime?>("NextAttemptAt")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("next_attempt_at");
 
                     b.Property<int>("SyncIntervalSeconds")
                         .HasColumnType("INTEGER")

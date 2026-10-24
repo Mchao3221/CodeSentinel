@@ -75,6 +75,53 @@ public sealed class TestGitRepo : IDisposable
     }
 
     /// <summary>
+    /// 从 main 拉出新分支，提交若干次并推送到远端，随后切回 main。
+    /// </summary>
+    /// <param name="branchName">分支名</param>
+    /// <param name="commitCount">新分支上的提交数量</param>
+    /// <returns>新分支的提交 SHA</returns>
+    public async Task<string> CreateBranchAsync(string branchName, int commitCount = 1)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(branchName);
+        if (commitCount <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(commitCount), "提交数量必须大于 0");
+        }
+
+        // 分支名中的斜杠不能直接作为文件名
+        var filePrefix = branchName.Replace('/', '-');
+        await RunGitAsync(WorkPath, ["checkout", "-b", branchName, "main"]);
+
+        for (var index = 0; index < commitCount; index++)
+        {
+            var fileName = $"{filePrefix}-{index}-{Guid.NewGuid():N}.txt";
+            await File.WriteAllTextAsync(Path.Combine(WorkPath, fileName), $"commit {index}\n");
+            await RunGitAsync(WorkPath, ["add", fileName]);
+            await RunGitAsync(WorkPath, ["commit", "-m", $"{branchName} commit {index}"]);
+        }
+
+        await RunGitAsync(WorkPath, ["push", "origin", branchName]);
+        var sha = (await RunGitAsync(WorkPath, ["rev-parse", "HEAD"])).Trim();
+        await RunGitAsync(WorkPath, ["checkout", "main"]);
+        return sha;
+    }
+
+    /// <summary>
+    /// 在 main 上追加一个提交并推送，用于制造与旧分支分叉的场景。
+    /// </summary>
+    /// <returns>main 新的提交 SHA</returns>
+    public async Task<string> CommitOnMainAsync()
+    {
+        await RunGitAsync(WorkPath, ["checkout", "main"]);
+        var fileName = $"main-{Guid.NewGuid():N}.txt";
+        await File.WriteAllTextAsync(Path.Combine(WorkPath, fileName), "main\n");
+        await RunGitAsync(WorkPath, ["add", fileName]);
+        await RunGitAsync(WorkPath, ["commit", "-m", "main commit"]);
+        await RunGitAsync(WorkPath, ["push", "origin", "main"]);
+        return (await RunGitAsync(WorkPath, ["rev-parse", "HEAD"])).Trim();
+    }
+
+    /// <summary>
     /// 在指定工作目录执行 git 命令，失败时抛出包含标准错误的异常。
     /// </summary>
     /// <param name="workDir">工作目录</param>

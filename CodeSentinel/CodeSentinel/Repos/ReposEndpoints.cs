@@ -212,7 +212,7 @@ public static class ReposEndpoints
             ?? throw RepoNotFound();
 
         var existingCredentials = request.Credential is null
-            ? ReadStoredCredentials(protector, repo)
+            ? RepoCredentials.Read(protector, repo)
             : null;
         var previousKind = repo.CredentialKind;
         var changes = await ApplyRepoPatchAsync(
@@ -256,7 +256,7 @@ public static class ReposEndpoints
         var repo = await db.Repos.AsNoTracking().FirstOrDefaultAsync(m => m.Id == id, ct)
             ?? throw RepoNotFound();
 
-        await mirrorService.TestAsync(repo.GitUrl, ReadStoredCredentials(protector, repo), ct);
+        await mirrorService.TestAsync(repo.GitUrl, RepoCredentials.Read(protector, repo), ct);
         return Results.Ok(new { ok = true });
     }
 
@@ -465,22 +465,6 @@ public static class ReposEndpoints
         }
 
         return (protector.Protect(credential), kind ?? fallbackKind ?? RepoCredentialKind.Password);
-    }
-
-    /// <summary>
-    /// 解密仓库已保存的凭据，未保存凭据时返回空。
-    /// </summary>
-    /// <param name="protector">凭据保护器</param>
-    /// <param name="repo">仓库</param>
-    /// <returns>git 凭据或 null</returns>
-    private static GitCredentials? ReadStoredCredentials(CredentialProtector protector, Repo repo)
-    {
-        if (repo.CredentialCipher is null || repo.CredentialKind is null)
-        {
-            return null;
-        }
-
-        return GitCredentials.FromStored(repo.CredentialKind.Value, protector.Unprotect(repo.CredentialCipher));
     }
 
     /// <summary>

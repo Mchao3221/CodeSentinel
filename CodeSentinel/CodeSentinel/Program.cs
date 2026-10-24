@@ -4,6 +4,7 @@ using CodeSentinel.Common;
 using CodeSentinel.Data;
 using CodeSentinel.Git;
 using CodeSentinel.Repos;
+using CodeSentinel.Sync;
 using CodeSentinel.Users;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
@@ -41,6 +42,18 @@ ConfigureDataProtection(builder);
 builder.Services.AddSingleton<CredentialProtector>();
 builder.Services.AddSingleton<GitCli>();
 builder.Services.AddSingleton<MirrorService>();
+builder.Services.AddSingleton<SyncThrottle>();
+builder.Services.AddSingleton<MirrorSyncWorker>();
+
+// 镜像同步配置：Sync:PollSeconds 默认 60 秒
+builder.Services.Configure<SyncOptions>(builder.Configuration.GetSection("Sync"));
+
+// 测试环境不启动后台轮询，避免与集成测试争用数据库与镜像目录
+if (!builder.Environment.IsEnvironment("Testing"))
+{
+    builder.Services.AddHostedService(
+        services => services.GetRequiredService<MirrorSyncWorker>());
+}
 
 // 全局枚举序列化为 SNAKE_CASE_UPPER
 builder.Services.ConfigureHttpJsonOptions(options =>
@@ -90,6 +103,9 @@ builder.Services.AddScoped<CsrfEndpointFilter>();
 
 var app = builder.Build();
 
+// 启动自检：git 不可用时非测试环境直接失败，测试环境只记录警告
+await EnsureGitAvailableAsync(app);
+
 // 非测试环境：执行迁移并在无管理员时生成一次性初始化口令
 if (!app.Environment.IsEnvironment("Testing"))
 {
@@ -134,6 +150,8 @@ api.MapAuthEndpoints(sessionHours);
 api.MapAdminSetupEndpoint();
 api.MapUsersEndpoints();
 api.MapReposEndpoints();
+api.MapBranchEndpoints();
+api.MapSyncEndpoints();
 
 app.Run();
 
@@ -184,6 +202,27 @@ static void ConfigureDataProtection(WebApplicationBuilder builder)
                 new DirectoryInfo(keyPath),
                 NullLoggerFactory.Instance);
         });
+}
+
+// 校验 git 命令可用：非测试环境失败即退出，测试环境只记录警告
+static async Task EnsureGitAvailableAsync(WebApplication app)
+{
+    var git = app.Services.GetRequiredService<GitCli>();
+    if (await git.VerifyAvailableAsync(CancellationToken.None))
+    {
+        return;
+    }
+
+    const string message = "未找到可用的 git 命令，请检查 Git:ExecutablePath 配置后重启。";
+
+    if (app.Environment.IsEnvironment("Testing"))
+    {
+        app.Logger.LogWarning(message);
+        return;
+    }
+
+    app.Logger.LogCritical(message);
+    throw new InvalidOperationException(message);
 }
 
 /// <summary>
