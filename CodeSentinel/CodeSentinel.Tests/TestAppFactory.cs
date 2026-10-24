@@ -33,6 +33,10 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>
         Path.GetTempPath(),
         $"codesentinel-tests-{Guid.NewGuid():N}.db");
 
+    private readonly string _storagePath = Path.Combine(
+        Path.GetTempPath(),
+        $"codesentinel-storage-{Guid.NewGuid():N}");
+
     /// <summary>
     /// 初始化工厂，校验连接串生效、创建测试数据库结构并写入种子管理员。
     /// </summary>
@@ -112,6 +116,11 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>
     public string DatabasePath => _databasePath;
 
     /// <summary>
+    /// 测试存储根目录，镜像与 Data Protection 密钥都落在临时目录。
+    /// </summary>
+    public string StoragePath => _storagePath;
+
+    /// <summary>
     /// 测试数据库连接串。
     /// </summary>
     private string ConnectionString => $"Data Source={DatabasePath};Pooling=False";
@@ -127,22 +136,45 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>
         {
             configuration.AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["ConnectionStrings:Default"] = ConnectionString
+                ["ConnectionStrings:Default"] = ConnectionString,
+                ["Storage:Root"] = _storagePath
             });
         });
     }
 
     /// <summary>
-    /// 释放宿主并删除临时数据库文件。
+    /// 释放宿主并删除临时数据库文件与存储目录。
     /// </summary>
     /// <param name="disposing">是否正在释放托管资源</param>
     protected override void Dispose(bool disposing)
     {
         base.Dispose(disposing);
 
-        if (disposing && File.Exists(_databasePath))
+        if (!disposing)
         {
-            File.Delete(_databasePath);
+            return;
+        }
+
+        DeleteFileIfExists(_databasePath);
+        TestPaths.DeleteDirectory(_storagePath);
+    }
+
+    /// <summary>
+    /// 删除临时数据库文件。
+    /// </summary>
+    /// <param name="path">文件路径</param>
+    private static void DeleteFileIfExists(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (IOException)
+        {
+            // 测试清理失败时忽略，临时文件由系统回收
         }
     }
 }

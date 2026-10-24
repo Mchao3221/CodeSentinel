@@ -16,7 +16,6 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
 {
     private const string TestPassword = "Passw0rd!";
     private const string TestCredential = "Sup3rSecret-Repo-Pass!";
-    private const string TestGitUrl = "https://git.example.com/team/repo.git";
 
     /// <summary>
     /// 只允许 http/https，ftp 地址应被拒绝。
@@ -42,22 +41,74 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
     }
 
     /// <summary>
+    /// 地址中内嵌用户名密码属于结构错误，应在任何 git 调用前拒绝。
+    /// </summary>
+    [Fact]
+    public async Task Create_repo_rejects_embedded_credentials()
+    {
+        var admin = await factory.LoginAsAdminAsync();
+
+        var response = await admin.PostJsonWithCsrfAsync(
+            "/api/repos",
+            new
+            {
+                name = UniqueName("embedded"),
+                gitUrl = "https://user:secret@example.com/repo.git",
+                defaultBaseBranch = "main"
+            });
+        var body = await response.Content.ReadFromJsonAsync<ErrorBody>();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.NotNull(body);
+        Assert.Equal("INVALID_REPO_URL", body.Code);
+    }
+
+    /// <summary>
+    /// 结构校验通过但无法连接的仓库应返回 400，且不落库。
+    /// </summary>
+    [Fact]
+    public async Task Create_repo_rejects_unreachable_url_and_does_not_persist()
+    {
+        var admin = await factory.LoginAsAdminAsync();
+        var name = UniqueName("unreachable");
+
+        var response = await admin.PostJsonWithCsrfAsync(
+            "/api/repos",
+            new
+            {
+                name,
+                gitUrl = "http://127.0.0.1:1/repo.git",
+                defaultBaseBranch = "main"
+            });
+        var body = await response.Content.ReadFromJsonAsync<ErrorBody>();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.NotNull(body);
+        Assert.Equal("REPO_UNREACHABLE", body.Code);
+
+        var list = await admin.GetFromJsonAsync<RepoListBody>("/api/repos?pageSize=100");
+        Assert.NotNull(list);
+        Assert.DoesNotContain(list.Items, m => m.Name == name);
+    }
+
+    /// <summary>
     /// 仓库名称重复（大小写不敏感）应返回 409。
     /// </summary>
     [Fact]
     public async Task Create_repo_rejects_duplicate_name()
     {
+        using var source = await TestGitRepo.CreateAsync();
         var admin = await factory.LoginAsAdminAsync();
         var name = UniqueName("dup");
 
         var first = await admin.PostJsonWithCsrfAsync(
             "/api/repos",
-            new { name, gitUrl = TestGitUrl, defaultBaseBranch = "main" });
+            new { name, gitUrl = source.Url, defaultBaseBranch = "main" });
         Assert.Equal(HttpStatusCode.Created, first.StatusCode);
 
         var duplicate = await admin.PostJsonWithCsrfAsync(
             "/api/repos",
-            new { name = name.ToLowerInvariant(), gitUrl = TestGitUrl, defaultBaseBranch = "main" });
+            new { name = name.ToLowerInvariant(), gitUrl = source.Url, defaultBaseBranch = "main" });
         var body = await duplicate.Content.ReadFromJsonAsync<ErrorBody>();
 
         Assert.Equal(HttpStatusCode.Conflict, duplicate.StatusCode);
@@ -71,6 +122,7 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
     [Fact]
     public async Task Credential_is_not_stored_in_plaintext()
     {
+        using var source = await TestGitRepo.CreateAsync();
         var admin = await factory.LoginAsAdminAsync();
 
         var response = await admin.PostJsonWithCsrfAsync(
@@ -78,7 +130,7 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
             new
             {
                 name = UniqueName("credential"),
-                gitUrl = TestGitUrl,
+                gitUrl = source.Url,
                 defaultBaseBranch = "main",
                 credential = TestCredential,
                 credentialKind = "PASSWORD"
@@ -108,15 +160,46 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
     }
 
     /// <summary>
+    /// 只更新凭据时保留仓库原有凭据类型，不能把 TOKEN 静默改成 PASSWORD。
+    /// </summary>
+    [Fact]
+    public async Task Patch_keeps_existing_credential_kind_when_only_credential_given()
+    {
+        using var source = await TestGitRepo.CreateAsync();
+        var admin = await factory.LoginAsAdminAsync();
+        var repo = await CreateRepoAsync(
+            admin,
+            UniqueName("token-kind"),
+            source.Url,
+            "original-token",
+            "TOKEN");
+
+        var patch = await admin.PatchJsonWithCsrfAsync(
+            $"/api/repos/{repo.Id}",
+            new { credential = "rotated-token" });
+        Assert.Equal(HttpStatusCode.OK, patch.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var stored = await db.Repos.AsNoTracking().SingleAsync(m => m.Id == repo.Id);
+
+        Assert.Equal(RepoCredentialKind.Token, stored.CredentialKind);
+        var provider = scope.ServiceProvider.GetRequiredService<IDataProtectionProvider>();
+        var decrypted = provider.CreateProtector("repo-credentials").Unprotect(stored.CredentialCipher!);
+        Assert.Equal("rotated-token", decrypted);
+    }
+
+    /// <summary>
     /// 保存成员时没有合并人应返回 400。
     /// </summary>
     [Fact]
     public async Task Members_put_requires_at_least_one_merger()
     {
+        using var source = await TestGitRepo.CreateAsync();
         var first = factory.SeedUser(UniqueName("member-a"), TestPassword);
         var second = factory.SeedUser(UniqueName("member-b"), TestPassword);
         var admin = await factory.LoginAsAdminAsync();
-        var repo = await CreateRepoAsync(admin, UniqueName("no-merger"));
+        var repo = await CreateRepoAsync(admin, UniqueName("no-merger"), source.Url);
 
         var response = await admin.PutJsonWithCsrfAsync(
             $"/api/repos/{repo.Id}/members",
@@ -141,9 +224,10 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
     [Fact]
     public async Task Non_member_gets_404_on_repo()
     {
+        using var source = await TestGitRepo.CreateAsync();
         var outsider = factory.SeedUser(UniqueName("outsider"), TestPassword);
         var admin = await factory.LoginAsAdminAsync();
-        var repo = await CreateRepoAsync(admin, UniqueName("private"));
+        var repo = await CreateRepoAsync(admin, UniqueName("private"), source.Url);
 
         var client = await factory.LoginAsync(outsider.Username, TestPassword);
         var response = await client.GetAsync($"/api/repos/{repo.Id}");
@@ -160,10 +244,11 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
     [Fact]
     public async Task Members_can_be_replaced_and_listed()
     {
+        using var source = await TestGitRepo.CreateAsync();
         var merger = factory.SeedUser(UniqueName("merger"), TestPassword);
         var reviewer = factory.SeedUser(UniqueName("reviewer"), TestPassword);
         var admin = await factory.LoginAsAdminAsync();
-        var repo = await CreateRepoAsync(admin, UniqueName("members"));
+        var repo = await CreateRepoAsync(admin, UniqueName("members"), source.Url);
 
         var put = await admin.PutJsonWithCsrfAsync(
             $"/api/repos/{repo.Id}/members",
@@ -204,8 +289,9 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
     [Fact]
     public async Task Patch_repo_updates_fields_and_clears_credential()
     {
+        using var source = await TestGitRepo.CreateAsync();
         var admin = await factory.LoginAsAdminAsync();
-        var repo = await CreateRepoAsync(admin, UniqueName("patch"), TestCredential);
+        var repo = await CreateRepoAsync(admin, UniqueName("patch"), source.Url, TestCredential);
         var newName = UniqueName("patched");
 
         var patch = await admin.PatchJsonWithCsrfAsync(
@@ -237,6 +323,26 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
     }
 
     /// <summary>
+    /// 连接测试端点使用已保存的凭据验证仓库，成功返回 ok。
+    /// </summary>
+    [Fact]
+    public async Task Test_connection_endpoint_reports_ok_for_stored_repo()
+    {
+        using var source = await TestGitRepo.CreateAsync();
+        var admin = await factory.LoginAsAdminAsync();
+        var repo = await CreateRepoAsync(admin, UniqueName("connection"), source.Url);
+
+        var response = await admin.PostJsonWithCsrfAsync(
+            $"/api/repos/{repo.Id}/test-connection",
+            new { });
+        var body = await response.Content.ReadFromJsonAsync<TestConnectionBody>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(body);
+        Assert.True(body.Ok);
+    }
+
+    /// <summary>
     /// 生成不重复的仓库或用户名称。
     /// </summary>
     /// <param name="prefix">名称前缀</param>
@@ -251,22 +357,26 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
     /// </summary>
     /// <param name="admin">管理员客户端</param>
     /// <param name="name">仓库名称</param>
+    /// <param name="gitUrl">仓库地址</param>
     /// <param name="credential">只读凭据明文，可选</param>
+    /// <param name="credentialKind">凭据类型，可选</param>
     /// <returns>仓库响应</returns>
     private static async Task<RepoBody> CreateRepoAsync(
         HttpClient admin,
         string name,
-        string? credential = null)
+        string gitUrl,
+        string? credential = null,
+        string? credentialKind = "PASSWORD")
     {
         var response = await admin.PostJsonWithCsrfAsync(
             "/api/repos",
             new
             {
                 name,
-                gitUrl = TestGitUrl,
+                gitUrl,
                 defaultBaseBranch = "main",
                 credential,
-                credentialKind = credential is null ? null : "PASSWORD"
+                credentialKind = credential is null ? null : credentialKind
             });
         var body = await response.Content.ReadFromJsonAsync<RepoBody>();
 
@@ -275,6 +385,12 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
         return body;
     }
 }
+
+/// <summary>
+/// 连接测试响应 DTO。
+/// </summary>
+/// <param name="Ok">是否连接成功</param>
+public sealed record TestConnectionBody(bool Ok);
 
 /// <summary>
 /// 仓库响应的测试 DTO。

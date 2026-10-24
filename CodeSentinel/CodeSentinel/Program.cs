@@ -2,12 +2,16 @@ using CodeSentinel.Audit;
 using CodeSentinel.Auth;
 using CodeSentinel.Common;
 using CodeSentinel.Data;
+using CodeSentinel.Git;
 using CodeSentinel.Repos;
 using CodeSentinel.Users;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
+using Microsoft.AspNetCore.DataProtection.Repositories;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -35,6 +39,8 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 ConfigureDataProtection(builder);
 
 builder.Services.AddSingleton<CredentialProtector>();
+builder.Services.AddSingleton<GitCli>();
+builder.Services.AddSingleton<MirrorService>();
 
 // 全局枚举序列化为 SNAKE_CASE_UPPER
 builder.Services.ConfigureHttpJsonOptions(options =>
@@ -162,15 +168,22 @@ static async Task WriteAuthErrorAsync(HttpContext context, int status, string co
 // 配置 Data Protection：固定应用名与密钥目录，确保凭据密文跨重启可解
 static void ConfigureDataProtection(WebApplicationBuilder builder)
 {
-    var storageRoot = builder.Configuration.GetValue("Storage:Root", DefaultStorageRoot) ?? DefaultStorageRoot;
-    var storagePath = Path.GetFullPath(storageRoot, builder.Environment.ContentRootPath);
-    var keyPath = Path.Combine(storagePath, "keys");
-    Directory.CreateDirectory(keyPath);
-
     builder.Services
         .AddDataProtection()
-        .SetApplicationName(DataProtectionApplicationName)
-        .PersistKeysToFileSystem(new DirectoryInfo(keyPath));
+        .SetApplicationName(DataProtectionApplicationName);
+
+    // 延迟到宿主构建完成后解析 Storage:Root，测试可覆盖到临时目录
+    builder.Services.AddOptions<KeyManagementOptions>()
+        .Configure<IConfiguration, IHostEnvironment>((options, configuration, environment) =>
+        {
+            var storageRoot = configuration.GetValue("Storage:Root", DefaultStorageRoot) ?? DefaultStorageRoot;
+            var storagePath = Path.GetFullPath(storageRoot, environment.ContentRootPath);
+            var keyPath = Path.Combine(storagePath, "keys");
+            Directory.CreateDirectory(keyPath);
+            options.XmlRepository = new FileSystemXmlRepository(
+                new DirectoryInfo(keyPath),
+                NullLoggerFactory.Instance);
+        });
 }
 
 /// <summary>

@@ -3,6 +3,8 @@ using CodeSentinel.Auth;
 using CodeSentinel.Common;
 using CodeSentinel.Data;
 using CodeSentinel.Data.Entities;
+using CodeSentinel.Git;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSentinel.Repos;
@@ -48,6 +50,8 @@ public static class ReposEndpoints
         group.MapGet("/{id:guid}/members", ListMembersAsync);
         group.MapPost(string.Empty, CreateRepoAsync).RequireAuthorization(CurrentUser.AdminRole);
         group.MapPatch("/{id:guid}", PatchRepoAsync).RequireAuthorization(CurrentUser.AdminRole);
+        group.MapPost("/{id:guid}/test-connection", TestConnectionAsync)
+            .RequireAuthorization(CurrentUser.AdminRole);
         group.MapPut("/{id:guid}/members", ReplaceMembersAsync).RequireAuthorization(CurrentUser.AdminRole);
     }
 
@@ -123,11 +127,12 @@ public static class ReposEndpoints
     }
 
     /// <summary>
-    /// 新增仓库：名称唯一、地址只做结构校验，凭据加密后入库。
+    /// 新增仓库：名称唯一、地址结构校验、保存前验证远端连通性，凭据加密后入库。
     /// </summary>
     /// <param name="request">创建请求</param>
     /// <param name="db">数据库上下文</param>
     /// <param name="protector">凭据保护器</param>
+    /// <param name="mirrorService">镜像服务，用于保存前连接测试</param>
     /// <param name="auditService">审计服务</param>
     /// <param name="httpContext">HTTP 上下文</param>
     /// <param name="environment">宿主环境</param>
@@ -137,6 +142,7 @@ public static class ReposEndpoints
         CreateRepoRequest request,
         AppDbContext db,
         CredentialProtector protector,
+        MirrorService mirrorService,
         AuditService auditService,
         HttpContext httpContext,
         IHostEnvironment environment,
@@ -146,8 +152,12 @@ public static class ReposEndpoints
         var gitUrl = RepoValidation.NormalizeUrl(request.GitUrl, IsTesting(environment));
         var baseBranch = NormalizeBaseBranch(request.DefaultBaseBranch);
         var syncInterval = NormalizeSyncInterval(request.SyncIntervalSeconds);
-        var credential = PrepareCredential(protector, request.Credential, request.CredentialKind);
+        var credential = PrepareCredential(protector, request.Credential, request.CredentialKind, null);
         await EnsureNameAvailableAsync(db, name, null, ct);
+
+        // 连通性不通过时不落库
+        var gitCredentials = ToGitCredentials(request.Credential, request.CredentialKind);
+        await mirrorService.TestAsync(gitUrl, gitCredentials, ct);
 
         var repo = new Repo
         {
@@ -162,7 +172,7 @@ public static class ReposEndpoints
         };
 
         db.Repos.Add(repo);
-        await db.SaveChangesAsync(ct);
+        await SaveRepoSafeAsync(db, ct);
         await auditService.RecordAsync(
             CurrentUser.Id(httpContext),
             RepoCreatedAction,
@@ -175,12 +185,13 @@ public static class ReposEndpoints
     }
 
     /// <summary>
-    /// 修改仓库信息，未提供的字段保持不变。
+    /// 修改仓库信息，未提供的字段保持不变，保存前验证远端连通性。
     /// </summary>
     /// <param name="id">仓库主键</param>
     /// <param name="request">更新请求</param>
     /// <param name="db">数据库上下文</param>
     /// <param name="protector">凭据保护器</param>
+    /// <param name="mirrorService">镜像服务，用于保存前连接测试</param>
     /// <param name="auditService">审计服务</param>
     /// <param name="httpContext">HTTP 上下文</param>
     /// <param name="environment">宿主环境</param>
@@ -191,6 +202,7 @@ public static class ReposEndpoints
         PatchRepoRequest request,
         AppDbContext db,
         CredentialProtector protector,
+        MirrorService mirrorService,
         AuditService auditService,
         HttpContext httpContext,
         IHostEnvironment environment,
@@ -199,10 +211,20 @@ public static class ReposEndpoints
         var repo = await db.Repos.FirstOrDefaultAsync(m => m.Id == id, ct)
             ?? throw RepoNotFound();
 
+        var existingCredentials = request.Credential is null
+            ? ReadStoredCredentials(protector, repo)
+            : null;
+        var previousKind = repo.CredentialKind;
         var changes = await ApplyRepoPatchAsync(
             db, repo, request, protector, IsTesting(environment), ct);
 
-        await db.SaveChangesAsync(ct);
+        // 使用请求中的新凭据，未提供时沿用已存凭据；验证通过后才落库
+        var gitCredentials = request.Credential is not null
+            ? ToGitCredentials(request.Credential, request.CredentialKind ?? previousKind)
+            : existingCredentials;
+        await mirrorService.TestAsync(repo.GitUrl, gitCredentials, ct);
+
+        await SaveRepoSafeAsync(db, ct);
         await auditService.RecordAsync(
             CurrentUser.Id(httpContext),
             RepoUpdatedAction,
@@ -213,6 +235,29 @@ public static class ReposEndpoints
 
         var dto = await ToRepoDtoAsync(db, repo, CurrentUser.RequireId(httpContext), ct);
         return Results.Ok(dto);
+    }
+
+    /// <summary>
+    /// 使用已保存的凭据测试仓库连通性。
+    /// </summary>
+    /// <param name="id">仓库主键</param>
+    /// <param name="db">数据库上下文</param>
+    /// <param name="protector">凭据保护器</param>
+    /// <param name="mirrorService">镜像服务</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>连接成功响应</returns>
+    private static async Task<IResult> TestConnectionAsync(
+        Guid id,
+        AppDbContext db,
+        CredentialProtector protector,
+        MirrorService mirrorService,
+        CancellationToken ct)
+    {
+        var repo = await db.Repos.AsNoTracking().FirstOrDefaultAsync(m => m.Id == id, ct)
+            ?? throw RepoNotFound();
+
+        await mirrorService.TestAsync(repo.GitUrl, ReadStoredCredentials(protector, repo), ct);
+        return Results.Ok(new { ok = true });
     }
 
     /// <summary>
@@ -386,7 +431,8 @@ public static class ReposEndpoints
         string? credential,
         RepoCredentialKind? kind)
     {
-        var prepared = PrepareCredential(protector, credential, kind);
+        // 未显式指定类型时保留仓库原有类型，避免把 TOKEN 静默改成 PASSWORD
+        var prepared = PrepareCredential(protector, credential, kind, repo.CredentialKind);
         repo.CredentialCipher = prepared.Cipher;
         repo.CredentialKind = prepared.Kind;
     }
@@ -397,11 +443,13 @@ public static class ReposEndpoints
     /// <param name="protector">凭据保护器</param>
     /// <param name="credential">明文凭据</param>
     /// <param name="kind">凭据类型</param>
+    /// <param name="fallbackKind">未指定类型时沿用的类型</param>
     /// <returns>密文与类型</returns>
     private static (string? Cipher, RepoCredentialKind? Kind) PrepareCredential(
         CredentialProtector protector,
         string? credential,
-        RepoCredentialKind? kind)
+        RepoCredentialKind? kind,
+        RepoCredentialKind? fallbackKind)
     {
         if (string.IsNullOrWhiteSpace(credential))
         {
@@ -416,7 +464,64 @@ public static class ReposEndpoints
             return (null, null);
         }
 
-        return (protector.Protect(credential), kind ?? RepoCredentialKind.Password);
+        return (protector.Protect(credential), kind ?? fallbackKind ?? RepoCredentialKind.Password);
+    }
+
+    /// <summary>
+    /// 解密仓库已保存的凭据，未保存凭据时返回空。
+    /// </summary>
+    /// <param name="protector">凭据保护器</param>
+    /// <param name="repo">仓库</param>
+    /// <returns>git 凭据或 null</returns>
+    private static GitCredentials? ReadStoredCredentials(CredentialProtector protector, Repo repo)
+    {
+        if (repo.CredentialCipher is null || repo.CredentialKind is null)
+        {
+            return null;
+        }
+
+        return GitCredentials.FromStored(repo.CredentialKind.Value, protector.Unprotect(repo.CredentialCipher));
+    }
+
+    /// <summary>
+    /// 把请求中的明文凭据转换为 git 进程凭据。
+    /// </summary>
+    /// <param name="credential">明文凭据</param>
+    /// <param name="kind">凭据类型，未提供时按密码处理</param>
+    /// <returns>git 凭据或 null</returns>
+    private static GitCredentials? ToGitCredentials(string? credential, RepoCredentialKind? kind)
+    {
+        return string.IsNullOrWhiteSpace(credential)
+            ? null
+            : GitCredentials.FromStored(kind ?? RepoCredentialKind.Password, credential);
+    }
+
+    /// <summary>
+    /// 保存仓库，唯一索引冲突时翻译为 409，覆盖并发创建同名仓库的竞态。
+    /// </summary>
+    /// <param name="db">数据库上下文</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>保存任务</returns>
+    private static async Task SaveRepoSafeAsync(AppDbContext db, CancellationToken ct)
+    {
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (IsUniqueNameViolation(ex))
+        {
+            throw new ApiException(StatusCodes.Status409Conflict, "REPO_NAME_EXISTS", "仓库名称已存在");
+        }
+    }
+
+    /// <summary>
+    /// 判断异常是否为仓库名称唯一约束冲突。
+    /// </summary>
+    /// <param name="exception">EF 更新异常</param>
+    /// <returns>是否为唯一约束冲突</returns>
+    private static bool IsUniqueNameViolation(DbUpdateException exception)
+    {
+        return exception.InnerException is SqliteException { SqliteErrorCode: 19 };
     }
 
     /// <summary>
