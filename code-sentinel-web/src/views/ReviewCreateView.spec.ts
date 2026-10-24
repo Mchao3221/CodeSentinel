@@ -56,14 +56,48 @@ function mockAdapter(handler: (config: InternalAxiosRequestConfig) => MockResult
   api.defaults.adapter = adapter;
 }
 
+/** 依赖接口名称，用于模拟部分失败 */
+type DependencyKey = 'branches' | 'unreviewed' | 'members';
+
 /**
- * 构造创建视图所需的接口数据，并记录创建请求体。
- * @param options.conflict 为 true 时创建接口返回 409 活跃评审冲突
+ * 创建视图的接口模拟选项。
  */
-function mockCreateApis(options: { conflict?: boolean } = {}): {
+interface CreateApiOptions {
+  /** 为 true 时创建接口返回 409 活跃评审冲突 */
+  conflict?: boolean;
+  /** 首次调用失败的依赖接口 */
+  failOnce?: DependencyKey;
+  /** 始终失败的依赖接口 */
+  failAlways?: DependencyKey;
+  /** 为 true 时分支接口返回空列表 */
+  emptyBranches?: boolean;
+}
+
+/** 依赖接口调用次数，用于验证重试 */
+type DependencyCalls = Record<DependencyKey, number>;
+
+/**
+ * 构造创建视图所需的接口数据，并记录创建请求体与依赖调用次数。
+ */
+function mockCreateApis(options: CreateApiOptions = {}): {
   bodies: Record<string, unknown>[];
+  calls: DependencyCalls;
 } {
   const bodies: Record<string, unknown>[] = [];
+  const calls: DependencyCalls = { branches: 0, unreviewed: 0, members: 0 };
+
+  /**
+   * 判断依赖接口本次是否应返回失败。
+   * @param key 依赖接口名称
+   * @returns 是否返回失败
+   */
+  function shouldFail(key: DependencyKey): boolean {
+    if (options.failAlways === key) {
+      return true;
+    }
+
+    return options.failOnce === key && calls[key] === 1;
+  }
 
   mockAdapter((config) => {
     const method = (config.method ?? 'get').toLowerCase();
@@ -74,26 +108,56 @@ function mockCreateApis(options: { conflict?: boolean } = {}): {
     }
 
     if (url === `/api/repos/${REPO_ID}/branches/unreviewed`) {
+      calls.unreviewed += 1;
+      if (shouldFail('unreviewed')) {
+        return {
+          status: 500,
+          data: { code: 'GIT_ERROR', message: 'git 计算失败', traceId: 'trace-unreviewed' },
+        };
+      }
+
       return {
         status: 200,
-        data: { items: [{ name: 'feature-a', headSha: 'sha-a', aheadBy: 2 }] },
+        data: {
+          items: options.emptyBranches === true
+            ? []
+            : [{ name: 'feature-a', headSha: 'sha-a', aheadBy: 2 }],
+        },
       };
     }
 
     if (url === `/api/repos/${REPO_ID}/branches`) {
+      calls.branches += 1;
+      if (shouldFail('branches')) {
+        return {
+          status: 500,
+          data: { code: 'GIT_ERROR', message: '分支读取失败', traceId: 'trace-branches' },
+        };
+      }
+
       return {
         status: 200,
         data: {
-          items: [
-            { name: 'main', headSha: 'sha-main' },
-            { name: 'feature-a', headSha: 'sha-a' },
-            { name: 'feature-b', headSha: 'sha-b' },
-          ],
+          items: options.emptyBranches === true
+            ? []
+            : [
+              { name: 'main', headSha: 'sha-main' },
+              { name: 'feature-a', headSha: 'sha-a' },
+              { name: 'feature-b', headSha: 'sha-b' },
+            ],
         },
       };
     }
 
     if (url === `/api/repos/${REPO_ID}/members`) {
+      calls.members += 1;
+      if (shouldFail('members')) {
+        return {
+          status: 500,
+          data: { code: 'INTERNAL_ERROR', message: '成员读取失败', traceId: 'trace-members' },
+        };
+      }
+
       return {
         status: 200,
         data: {
@@ -161,7 +225,7 @@ function mockCreateApis(options: { conflict?: boolean } = {}): {
     return { status: 404, data: { code: 'NOT_FOUND', message: url, traceId: 'trace' } };
   });
 
-  return { bodies };
+  return { bodies, calls };
 }
 
 /**
@@ -294,6 +358,83 @@ describe('新建评审视图', () => {
     await wrapper.find('input[placeholder="请输入标题"]').setValue('补充说明');
     await flushPromises();
     expect(wrapper.find('.submit-button').attributes('disabled')).toBeUndefined();
+  });
+
+  it('unreviewed 接口失败时降级为普通分支列表并可提交', async () => {
+    const { bodies } = mockCreateApis({ failAlways: 'unreviewed' });
+    const pinia = createTestPinia();
+    const router = createRouter({ history: createMemoryHistory(), routes: [] });
+    vi.spyOn(router, 'push').mockResolvedValue(undefined);
+    const wrapper = mountView(pinia, router);
+
+    await selectRepo(wrapper);
+
+    const featureOptions = wrapper
+      .findAllComponents(ElOption)
+      .filter((option) => option.props('value') === 'feature-a');
+    // 降级后走普通分支列表，不带“领先 N 个提交”标注
+    expect(featureOptions.map((option) => option.props('label'))).toContain('feature-a');
+
+    selectAt(wrapper, 2).vm.$emit('update:modelValue', 'feature-a');
+    selectAt(wrapper, 3).vm.$emit('update:modelValue', [OTHER_ID]);
+    await flushPromises();
+    await wrapper.find('input[placeholder="请输入标题"]').setValue('修复登录问题');
+    await flushPromises();
+
+    await wrapper.find('.submit-button').trigger('click');
+    await flushPromises();
+    expect(bodies).toHaveLength(1);
+  });
+
+  it('branches 接口失败时显示页内错误，重试后恢复', async () => {
+    const { calls } = mockCreateApis({ failOnce: 'branches' });
+    const pinia = createTestPinia();
+    const router = createRouter({ history: createMemoryHistory(), routes: [] });
+    const wrapper = mountView(pinia, router);
+
+    await selectRepo(wrapper);
+
+    expect(wrapper.find('.review-create-branches-error').text()).toContain('分支加载失败');
+    expect(calls.branches).toBe(1);
+
+    await wrapper.find('.review-create-branches-error .el-button').trigger('click');
+    await flushPromises();
+
+    expect(calls.branches).toBe(2);
+    expect(wrapper.find('.review-create-branches-error').exists()).toBe(false);
+
+    const optionValues = wrapper
+      .findAllComponents(ElOption)
+      .map((option) => String(option.props('value')));
+    expect(optionValues).toContain('feature-b');
+  });
+
+  it('members 接口失败时不崩溃并显示可重试提示', async () => {
+    mockCreateApis({ failAlways: 'members' });
+    const pinia = createTestPinia();
+    const router = createRouter({ history: createMemoryHistory(), routes: [] });
+    const wrapper = mountView(pinia, router);
+
+    await selectRepo(wrapper);
+
+    expect(wrapper.find('.review-create-members-error').text()).toContain('审核人加载失败');
+    const optionValues = wrapper
+      .findAllComponents(ElOption)
+      .map((option) => String(option.props('value')));
+    expect(optionValues).not.toContain(OTHER_ID);
+    // 分支结果不受成员失败影响
+    expect(optionValues).toContain('feature-b');
+  });
+
+  it('仓库无分支时显示空状态提示', async () => {
+    mockCreateApis({ emptyBranches: true });
+    const pinia = createTestPinia();
+    const router = createRouter({ history: createMemoryHistory(), routes: [] });
+    const wrapper = mountView(pinia, router);
+
+    await selectRepo(wrapper);
+
+    expect(wrapper.find('.review-create-empty-hint').text()).toContain('该仓库暂无可选分支');
   });
 
   it('409 冲突时保留表单并展示已有评审单跳转', async () => {

@@ -78,6 +78,10 @@ const members = ref<RepoMember[]>([]);
 const loadingRepos = ref(false);
 /** 分支与成员加载状态 */
 const loadingRepoData = ref(false);
+/** 分支接口是否失败，失败时展示页内错误与重试入口 */
+const branchesFailed = ref(false);
+/** 成员接口是否失败，失败时审核人列表为空并展示重试提示 */
+const membersFailed = ref(false);
 /** 提交中状态 */
 const submitting = ref(false);
 /** 冲突的已有评审单主键，非空时展示跳转提示 */
@@ -136,6 +140,15 @@ const reviewerOptions = computed(() =>
   members.value.filter((member) => member.userId !== authStore.user?.id),
 );
 
+/** 仓库没有可选分支时展示空状态提示 */
+const showEmptyBranchHint = computed(
+  () =>
+    form.repoId !== ''
+    && !loadingRepoData.value
+    && !branchesFailed.value
+    && headBranchGroups.value.length === 0,
+);
+
 /** 表单是否满足提交条件 */
 const formReady = computed(
   () =>
@@ -144,6 +157,51 @@ const formReady = computed(
     && form.reviewerIds.length > 0
     && form.title.trim().length > 0,
 );
+
+/**
+ * 加载当前仓库的分支与成员；各接口独立降级，任一失败不阻塞提交。
+ * @param repoId 仓库主键
+ */
+async function loadRepoData(repoId: string): Promise<void> {
+  loadingRepoData.value = true;
+  branchesFailed.value = false;
+  membersFailed.value = false;
+  try {
+    const [branchResult, unreviewedResult, memberResult] = await Promise.allSettled([
+      fetchBranches(repoId),
+      fetchUnreviewedBranches(repoId),
+      fetchRepoMembers(repoId),
+    ] as const);
+
+    // 用户已切换仓库时丢弃过期响应
+    if (form.repoId !== repoId) {
+      return;
+    }
+
+    branches.value = branchResult.status === 'fulfilled' ? branchResult.value : [];
+    branchesFailed.value = branchResult.status === 'rejected';
+
+    // 未开单分支计算失败时降级为普通分支列表，不阻塞提交
+    unreviewedBranches.value =
+      unreviewedResult.status === 'fulfilled' ? unreviewedResult.value : [];
+
+    members.value = memberResult.status === 'fulfilled' ? memberResult.value : [];
+    membersFailed.value = memberResult.status === 'rejected';
+  } finally {
+    loadingRepoData.value = false;
+  }
+}
+
+/**
+ * 重新加载当前仓库的分支与成员。
+ */
+async function retryLoadRepoData(): Promise<void> {
+  if (form.repoId === '') {
+    return;
+  }
+
+  await loadRepoData(form.repoId);
+}
 
 /**
  * 切换仓库后重置分支与审核人，并加载仓库的分支和成员。
@@ -160,31 +218,13 @@ async function handleRepoChange(repoId: string): Promise<void> {
 
   const repo = repos.value.find((item) => item.id === repoId);
   if (repo === undefined) {
+    branchesFailed.value = false;
+    membersFailed.value = false;
     return;
   }
 
   form.baseBranch = repo.defaultBaseBranch;
-  loadingRepoData.value = true;
-  try {
-    const [branchList, unreviewedList, memberList] = await Promise.all([
-      fetchBranches(repoId),
-      fetchUnreviewedBranches(repoId),
-      fetchRepoMembers(repoId),
-    ]);
-
-    // 用户已切换仓库时丢弃过期响应
-    if (form.repoId !== repoId) {
-      return;
-    }
-
-    branches.value = branchList;
-    unreviewedBranches.value = unreviewedList;
-    members.value = memberList;
-  } catch {
-    ElMessage.error('仓库分支或成员加载失败，请稍后重试');
-  } finally {
-    loadingRepoData.value = false;
-  }
+  await loadRepoData(repoId);
 }
 
 /**
@@ -327,6 +367,28 @@ onMounted(() => {
       <el-button link type="primary" @click="openExistingReview">查看已有评审单</el-button>
     </el-alert>
 
+    <el-alert
+      v-if="branchesFailed"
+      class="review-create-branches-error review-create-load-error"
+      type="error"
+      title="分支加载失败，请重新加载"
+      show-icon
+      :closable="false"
+    >
+      <el-button link type="primary" @click="retryLoadRepoData">重新加载</el-button>
+    </el-alert>
+
+    <el-alert
+      v-if="membersFailed"
+      class="review-create-members-error review-create-load-error"
+      type="warning"
+      title="审核人加载失败，请重新加载"
+      show-icon
+      :closable="false"
+    >
+      <el-button link type="primary" @click="retryLoadRepoData">重新加载</el-button>
+    </el-alert>
+
     <el-form
       ref="formRef"
       class="review-create-form"
@@ -386,6 +448,9 @@ onMounted(() => {
             />
           </el-option-group>
         </el-select>
+        <p v-if="showEmptyBranchHint" class="review-create-empty-hint">
+          该仓库暂无可选分支
+        </p>
       </el-form-item>
 
       <el-form-item label="审核人" prop="reviewerIds">
@@ -459,6 +524,16 @@ onMounted(() => {
 
 .review-create-conflict {
   margin-bottom: 16px;
+}
+
+.review-create-load-error {
+  margin-bottom: 16px;
+}
+
+.review-create-empty-hint {
+  margin: 4px 0 0;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
 }
 
 .review-create-select {
