@@ -366,6 +366,12 @@ public sealed class RevisionService(
         }
         catch (Exception ex)
         {
+            // 取消语义必须向上冒泡，不能被“不影响新版本”的兜底吞掉
+            if (ct.IsCancellationRequested)
+            {
+                throw new OperationCanceledException("评论重新锚定已取消", ex, ct);
+            }
+
             logger.LogWarning(ex, "评审单 {ReviewId} 重新锚定失败，新版本已保留", reviewId);
         }
     }

@@ -402,6 +402,226 @@ public class AnchorTests
     }
 
     /// <summary>
+    /// 评论在版本前进期间处于 Resolved 而未跟随迁移，取消解决后坐标已过期：
+    /// 下一跳不得盲目平移，应标记 OUTDATED 且行号保持不变。
+    /// </summary>
+    [Fact]
+    public async Task Resolved_then_unresolved_comment_is_outdated_on_later_revision()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedContextAsync(
+            factory,
+            source,
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("one\ntwo\nthree\n") },
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("one\ntwo\nthree\nfour\n") });
+        var client = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var review = await CreateReviewAsync(client, context);
+        var created = await CreateCommentAsync(client, review.Id, "a.txt", "NEW", 1, "首行评论");
+        var comment = await ReadCommentBodyAsync(created);
+        var originBlob = await RevParseBlobAsync(source, context.HeadSha, "a.txt");
+
+        // rev2 生成前先解决评论，使其跳过这一跳的重定位
+        var resolved = await client.PostJsonWithCsrfAsync(
+            $"/api/comments/{comment.Id}/resolve", new { });
+        Assert.Equal(HttpStatusCode.OK, resolved.StatusCode);
+
+        var head2 = await source.CommitChangesAsync(
+            HeadBranch,
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("zero\none\ntwo\nthree\nfour\n") });
+        await FetchMirrorAsync(factory, context.Repo);
+        await AddRevisionAsync(factory, review.Id, head2);
+
+        // rev2 之后取消解决，评论坐标仍停留在 rev1
+        var unresolved = await client.PostJsonWithCsrfAsync(
+            $"/api/comments/{comment.Id}/unresolve", new { });
+        Assert.Equal(HttpStatusCode.OK, unresolved.StatusCode);
+
+        var head3 = await source.CommitChangesAsync(
+            HeadBranch,
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("minus\nzero\none\ntwo\nthree\nfour\n") });
+        await FetchMirrorAsync(factory, context.Repo);
+        await AddRevisionAsync(factory, review.Id, head3);
+
+        var stored = await ReadCommentAsync(factory, comment.Id);
+        Assert.Equal(CommentStatus.Outdated, stored.Status);
+        Assert.Equal(1, stored.LineNumber);
+        Assert.Equal(originBlob, stored.BlobSha);
+    }
+
+    /// <summary>
+    /// 评论 blob id 已等于新 head 的文件 blob 时，视为已在新坐标：保留行号，只同步路径。
+    /// </summary>
+    [Fact]
+    public async Task Comment_already_at_new_head_coordinates_is_kept()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedContextAsync(
+            factory,
+            source,
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("one\ntwo\nthree\n") },
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("one\ntwo\nthree\nfour\n") });
+        var client = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var review = await CreateReviewAsync(client, context);
+        var created = await CreateCommentAsync(client, review.Id, "a.txt", "NEW", 1, "首行评论");
+        var comment = await ReadCommentBodyAsync(created);
+
+        var head2 = await source.CommitChangesAsync(
+            HeadBranch,
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("zero\none\ntwo\nthree\nfour\n") });
+        await FetchMirrorAsync(factory, context.Repo);
+        var fromRevisionId = review.Revisions[0].Id;
+        var toRevisionId = await InsertRevisionAsync(factory, review.Id, context.BaseSha, head2);
+        var newBlobSha = await RevParseBlobAsync(source, head2, "a.txt");
+
+        // 模拟评论已持有新 head 坐标（blob 指向新 head）
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            await db.Comments
+                .Where(m => m.Id == comment.Id)
+                .ExecuteUpdateAsync(m => m.SetProperty(c => c.BlobSha, newBlobSha));
+        }
+
+        var report = await ReanchorAsync(factory, review.Id, fromRevisionId, toRevisionId);
+
+        Assert.Equal(new ReanchorReport(Kept: 1, Moved: 0, Outdated: 0), report);
+        var stored = await ReadCommentAsync(factory, comment.Id);
+        Assert.Equal(1, stored.LineNumber);
+        Assert.Equal(CommentStatus.Open, stored.Status);
+        Assert.Equal(newBlobSha, stored.BlobSha);
+    }
+
+    /// <summary>
+    /// revision_id 等于目标版本的评论已处于新坐标，本跳不得重复处理。
+    /// </summary>
+    [Fact]
+    public async Task Comment_created_in_target_revision_is_not_reanchored()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedContextAsync(
+            factory,
+            source,
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("one\ntwo\nthree\n") },
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("one\ntwo\nthree\nfour\n") });
+        var client = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var review = await CreateReviewAsync(client, context);
+
+        var head2 = await source.CommitChangesAsync(
+            HeadBranch,
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("zero\none\ntwo\nthree\nfour\n") });
+        await FetchMirrorAsync(factory, context.Repo);
+        var fromRevisionId = review.Revisions[0].Id;
+        var toRevisionId = await InsertRevisionAsync(factory, review.Id, context.BaseSha, head2);
+        var originBlob = await RevParseBlobAsync(source, context.HeadSha, "a.txt");
+
+        // 属于 rev2 的评论若被误当作 rev1 坐标，会从第 1 行平移到第 2 行
+        var commentId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            db.Comments.Add(new Comment
+            {
+                Id = commentId,
+                ReviewId = review.Id,
+                RevisionId = toRevisionId,
+                AuthorId = context.Submitter.Id,
+                FilePath = "a.txt",
+                Side = "NEW",
+                LineNumber = 1,
+                AnchorText = "one",
+                BlobSha = originBlob,
+                Body = "新版本坐标评论",
+                Status = CommentStatus.Open
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var report = await ReanchorAsync(factory, review.Id, fromRevisionId, toRevisionId);
+
+        Assert.Equal(new ReanchorReport(Kept: 0, Moved: 0, Outdated: 0), report);
+        var stored = await ReadCommentAsync(factory, commentId);
+        Assert.Equal(1, stored.LineNumber);
+        Assert.Equal(originBlob, stored.BlobSha);
+        Assert.Equal(CommentStatus.Open, stored.Status);
+    }
+
+    /// <summary>
+    /// 重定位保存失败时，同一 DbContext 的后续保存不得写入部分重定位结果。
+    /// </summary>
+    [Fact]
+    public async Task Failed_reanchor_does_not_persist_partial_changes()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedContextAsync(
+            factory,
+            source,
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("one\ntwo\nthree\n") },
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("one\ntwo\nthree\nfour\n") });
+        var client = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var review = await CreateReviewAsync(client, context);
+        var created = await CreateCommentAsync(client, review.Id, "a.txt", "NEW", 3, "第三行评论");
+        var comment = await ReadCommentBodyAsync(created);
+        var originBlob = await RevParseBlobAsync(source, context.HeadSha, "a.txt");
+
+        var head2 = await source.CommitChangesAsync(
+            HeadBranch,
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("zero\none\ntwo\nthree\nfour\n") });
+        await FetchMirrorAsync(factory, context.Repo);
+        var fromRevisionId = review.Revisions[0].Id;
+        var toRevisionId = await InsertRevisionAsync(factory, review.Id, context.BaseSha, head2);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        await db.Database.ExecuteSqlRawAsync(
+            "CREATE TRIGGER comments_reject_update BEFORE UPDATE ON comments " +
+            "BEGIN SELECT RAISE(ABORT, 'boom'); END;");
+        var service = scope.ServiceProvider.GetRequiredService<AnchorService>();
+
+        await Assert.ThrowsAsync<DbUpdateException>(() =>
+            service.ReanchorAsync(review.Id, fromRevisionId, toRevisionId, CancellationToken.None));
+
+        // 若失败后残留 Modified 跟踪实体，这次保存会再次触发触发器
+        await db.SaveChangesAsync();
+
+        var stored = await ReadCommentAsync(factory, comment.Id);
+        Assert.Equal(3, stored.LineNumber);
+        Assert.Equal(originBlob, stored.BlobSha);
+        Assert.Equal(CommentStatus.Open, stored.Status);
+    }
+
+    /// <summary>
+    /// 取消令牌已取消时，重定位抛出的取消异常必须向上冒泡。
+    /// </summary>
+    [Fact]
+    public async Task Cancelled_reanchor_propagates_operation_canceled()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedContextAsync(
+            factory,
+            source,
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("one\ntwo\nthree\n") },
+            new Dictionary<string, byte[]> { ["a.txt"] = Text("one\ntwo\nthree\nfour\n") });
+        var client = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var review = await CreateReviewAsync(client, context);
+        var fromRevisionId = review.Revisions[0].Id;
+        var toRevisionId = await InsertRevisionAsync(
+            factory, review.Id, context.BaseSha, context.HeadSha);
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        using var scope = factory.Services.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<AnchorService>();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            service.ReanchorAsync(review.Id, fromRevisionId, toRevisionId, cts.Token));
+    }
+
+    /// <summary>
     /// RevisionService 创建新版本后应自动触发重新定位，评论行号随之更新。
     /// </summary>
     [Fact]

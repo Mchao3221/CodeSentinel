@@ -15,7 +15,8 @@ namespace CodeSentinel.Reviews;
 public sealed record ReanchorReport(int Kept, int Moved, int Outdated);
 
 /// <summary>
-/// 评论重新锚定服务：新版本生成后，把旧版本上的 NEW 侧评论映射到新 head。
+/// 评论重新锚定服务：新版本生成后，把未解决 NEW 侧评论映射到新 head。
+/// 以评论记录的 blob id 判定其坐标所在的版本，避免把其它版本的坐标重复平移。
 /// </summary>
 /// <param name="db">数据库上下文</param>
 /// <param name="diffService">diff 引擎，用于读取版本间 diff 与文件内容</param>
@@ -27,7 +28,7 @@ public sealed class AnchorService(AppDbContext db, DiffService diffService)
 
     /// <summary>
     /// 把评审单上所有未解决 NEW 侧评论重新锚定到新版本。
-    /// 评论位置在上一跳已被就地更新到 fromRevision 的 head 坐标，因此逐跳累积映射即可跨多次版本迁移。
+    /// 评论位置在上一跳已就地更新到 fromRevision 的 head 坐标，因此逐跳累积映射即可跨多次版本迁移。
     /// </summary>
     /// <param name="reviewId">评审单主键</param>
     /// <param name="fromRevisionId">旧版本主键</param>
@@ -53,12 +54,9 @@ public sealed class AnchorService(AppDbContext db, DiffService diffService)
             return new ReanchorReport(0, 0, 0);
         }
 
-        // 不按 revision_id 过滤：评论的当前位置可能来自更早的版本，需逐跳累积映射
-        var comments = await db.Comments
-            .Where(m => m.ReviewId == reviewId
-                && m.Status == CommentStatus.Open
-                && m.Side == NewSide)
-            .ToListAsync(ct);
+        // 不按 revision_id == fromRevision 过滤：评论可能由更早版本逐跳迁移而来。
+        // 但目标版本上刚创建的评论已经是新坐标，必须排除，避免被重复映射。
+        var comments = await LoadOpenCommentsAsync(reviewId, toRevisionId, ct);
         if (comments.Count == 0)
         {
             return new ReanchorReport(0, 0, 0);
@@ -66,15 +64,45 @@ public sealed class AnchorService(AppDbContext db, DiffService diffService)
 
         var changes = await diffService.GetChangesAsync(
             review.RepoId, heads.Value.FromHead, heads.Value.ToHead, ct);
-        var blobs = new Dictionary<string, BlobContent>(StringComparer.Ordinal);
+        var session = new ReanchorSession(
+            review.RepoId, heads.Value.FromHead, heads.Value.ToHead, changes);
+        var snapshots = comments.ToDictionary(
+            m => m.Id,
+            m => new CommentSnapshot(m.Status, m.FilePath, m.LineNumber, m.BlobSha));
+
+        try
+        {
+            var report = await ApplyAsync(session, comments, ct);
+            await db.SaveChangesAsync(ct);
+            return report;
+        }
+        catch (Exception)
+        {
+            // 失败时还原跟踪实体，避免同一 scope 的后续保存写入部分重定位结果
+            RestoreSnapshots(comments, snapshots);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// 依次处理评论并汇总保留、移动与失效数量。
+    /// </summary>
+    /// <param name="session">本次重新锚定的会话状态</param>
+    /// <param name="comments">待处理评论</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>重新锚定结果</returns>
+    private async Task<ReanchorReport> ApplyAsync(
+        ReanchorSession session,
+        IReadOnlyList<Comment> comments,
+        CancellationToken ct)
+    {
         var kept = 0;
         var moved = 0;
         var outdated = 0;
 
         foreach (var comment in comments)
         {
-            var outcome = await ReanchorOneAsync(
-                review.RepoId, heads.Value, changes, comment, blobs, ct);
+            var outcome = await ReanchorOneAsync(session, comment, ct);
 
             if (outcome == ReanchorOutcome.Kept)
             {
@@ -90,7 +118,6 @@ public sealed class AnchorService(AppDbContext db, DiffService diffService)
             }
         }
 
-        await db.SaveChangesAsync(ct);
         return new ReanchorReport(kept, moved, outdated);
     }
 
@@ -121,97 +148,86 @@ public sealed class AnchorService(AppDbContext db, DiffService diffService)
     }
 
     /// <summary>
-    /// 处理单条评论：未变保留、可映射则更新位置、无法定位则标记失效。
+    /// 加载需要参与重定位的评论：全部未解决 NEW 侧评论，排除目标版本新建的评论。
     /// </summary>
-    /// <param name="repoId">仓库主键</param>
-    /// <param name="heads">新旧版本的 head</param>
-    /// <param name="changes">版本间全部文件变更</param>
+    /// <param name="reviewId">评审单主键</param>
+    /// <param name="toRevisionId">新版本主键</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>参与重定位的评论</returns>
+    private async Task<List<Comment>> LoadOpenCommentsAsync(
+        Guid reviewId,
+        Guid toRevisionId,
+        CancellationToken ct)
+    {
+        return await db.Comments
+            .Where(m => m.ReviewId == reviewId
+                && m.Status == CommentStatus.Open
+                && m.Side == NewSide
+                && m.RevisionId != toRevisionId)
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// 处理单条评论：按 blob id 判定坐标版本，再决定保留、映射或失效。
+    /// </summary>
+    /// <param name="session">本次重新锚定的会话状态</param>
     /// <param name="comment">待处理评论</param>
-    /// <param name="blobs">新版本文件内容缓存</param>
     /// <param name="ct">取消令牌</param>
     /// <returns>单条评论的处理结果</returns>
     private async Task<ReanchorOutcome> ReanchorOneAsync(
-        Guid repoId,
-        (string FromHead, string ToHead) heads,
-        IReadOnlyList<DiffFile> changes,
+        ReanchorSession session,
         Comment comment,
-        Dictionary<string, BlobContent> blobs,
         CancellationToken ct)
     {
-        var change = FindChange(changes, comment.FilePath);
-        var probe = await ProbeBlobAsync(repoId, heads, change, comment, ct);
-        if (probe.Final is not null)
+        var change = FindChange(session.Changes, comment.FilePath);
+        if (change?.Status == FileChangeStatus.Deleted)
         {
-            return probe.Final.Value;
+            return Outdated(comment);
         }
 
-        // ProbeBlobAsync 只在文件发生变更且内容不同时返回 null，此处必有变更
+        var newPath = change?.Path ?? comment.FilePath;
+        var newBlobSha = await GetBlobShaAsync(session, session.ToHead, newPath, ct);
+        if (newBlobSha is null)
+        {
+            return Outdated(comment);
+        }
+
+        // 评论已在新 head 坐标：只同步重命名后的路径，行号保持不动
+        if (string.Equals(comment.BlobSha, newBlobSha, StringComparison.Ordinal))
+        {
+            ApplyPosition(comment, newPath, comment.LineNumber, newBlobSha);
+            return ReanchorOutcome.Kept;
+        }
+
+        var fromBlobSha = await GetBlobShaAsync(session, session.FromHead, comment.FilePath, ct);
+        if (!string.Equals(comment.BlobSha, fromBlobSha, StringComparison.Ordinal))
+        {
+            // 坐标来自更早版本且未跟随迁移，不能盲目按本跳差值平移
+            return Outdated(comment);
+        }
+
         if (change is null)
         {
             return Outdated(comment);
         }
 
-        return await VerifyPositionAsync(
-            repoId, heads.ToHead, change, probe.NewBlobSha, comment, blobs, ct);
-    }
-
-    /// <summary>
-    /// 按文件删除与 blob id 判定评论能否直接保留；需要继续映射时 Final 为 null。
-    /// </summary>
-    /// <param name="repoId">仓库主键</param>
-    /// <param name="heads">新旧版本的 head</param>
-    /// <param name="change">命中的文件变更，未变化时为 null</param>
-    /// <param name="comment">待处理评论</param>
-    /// <param name="ct">取消令牌</param>
-    /// <returns>最终结果与新版本 blob id，需继续映射时 Final 为 null</returns>
-    private async Task<(ReanchorOutcome? Final, string NewBlobSha)> ProbeBlobAsync(
-        Guid repoId,
-        (string FromHead, string ToHead) heads,
-        DiffFile? change,
-        Comment comment,
-        CancellationToken ct)
-    {
-        var newPath = change?.Path ?? comment.FilePath;
-        if (change?.Status == FileChangeStatus.Deleted)
-        {
-            return (Outdated(comment), string.Empty);
-        }
-
-        var newBlobSha = await TryGetBlobShaAsync(repoId, heads.ToHead, newPath, ct);
-        if (newBlobSha is null)
-        {
-            return (Outdated(comment), string.Empty);
-        }
-
-        // 内容未变化（含纯重命名）：保留位置，只同步路径与 blob id
-        var oldBlobSha = await TryGetBlobShaAsync(repoId, heads.FromHead, comment.FilePath, ct);
-        if (string.Equals(oldBlobSha, newBlobSha, StringComparison.Ordinal))
-        {
-            ApplyPosition(comment, newPath, comment.LineNumber, newBlobSha);
-            return (ReanchorOutcome.Kept, newBlobSha);
-        }
-
-        return (change is null ? ReanchorOutcome.Outdated : null, newBlobSha);
+        return await VerifyPositionAsync(session, change, newBlobSha, comment, ct);
     }
 
     /// <summary>
     /// 在映射后的位置校验锚点原文，必要时在 ±5 行内搜索，更新位置或标记失效。
     /// </summary>
-    /// <param name="repoId">仓库主键</param>
-    /// <param name="toHead">新版本 head</param>
+    /// <param name="session">本次重新锚定的会话状态</param>
     /// <param name="change">命中的文件变更</param>
     /// <param name="newBlobSha">新版本 blob id</param>
     /// <param name="comment">待处理评论</param>
-    /// <param name="blobs">新版本文件内容缓存</param>
     /// <param name="ct">取消令牌</param>
     /// <returns>单条评论的处理结果</returns>
     private async Task<ReanchorOutcome> VerifyPositionAsync(
-        Guid repoId,
-        string toHead,
+        ReanchorSession session,
         DiffFile change,
         string newBlobSha,
         Comment comment,
-        Dictionary<string, BlobContent> blobs,
         CancellationToken ct)
     {
         var mapped = LineMapper.Map(change, NewSide, comment.LineNumber);
@@ -220,7 +236,7 @@ public sealed class AnchorService(AppDbContext db, DiffService diffService)
             return Outdated(comment);
         }
 
-        var blob = await LoadBlobAsync(repoId, toHead, change.Path, blobs, ct);
+        var blob = await LoadBlobAsync(session, change.Path, ct);
         if (blob is null)
         {
             return Outdated(comment);
@@ -262,46 +278,52 @@ public sealed class AnchorService(AppDbContext db, DiffService diffService)
     }
 
     /// <summary>
-    /// 读取 blob id；文件不存在时返回 null，供失效判定使用。
+    /// 读取指定提交下文件的 blob id，按提交与路径缓存，文件不存在时返回 null。
     /// </summary>
-    /// <param name="repoId">仓库主键</param>
+    /// <param name="session">本次重新锚定的会话状态</param>
     /// <param name="commitSha">提交 SHA</param>
     /// <param name="path">文件路径</param>
     /// <param name="ct">取消令牌</param>
     /// <returns>blob id 或 null</returns>
-    private async Task<string?> TryGetBlobShaAsync(
-        Guid repoId,
+    private async Task<string?> GetBlobShaAsync(
+        ReanchorSession session,
         string commitSha,
         string path,
         CancellationToken ct)
     {
+        var key = (commitSha, path);
+        if (session.BlobShas.TryGetValue(key, out var cached))
+        {
+            return cached;
+        }
+
+        string? sha;
         try
         {
-            return await diffService.GetBlobShaAsync(repoId, commitSha, path, ct);
+            sha = await diffService.GetBlobShaAsync(session.RepoId, commitSha, path, ct);
         }
         catch (ApiException)
         {
-            return null;
+            sha = null;
         }
+
+        session.BlobShas[key] = sha;
+        return sha;
     }
 
     /// <summary>
     /// 读取新版本文件内容；超大或二进制文件不参与匹配，返回 null。
     /// </summary>
-    /// <param name="repoId">仓库主键</param>
-    /// <param name="commitSha">提交 SHA</param>
+    /// <param name="session">本次重新锚定的会话状态</param>
     /// <param name="path">文件路径</param>
-    /// <param name="cache">按路径缓存的文件内容</param>
     /// <param name="ct">取消令牌</param>
     /// <returns>可匹配的文件内容，不可评论时为 null</returns>
     private async Task<BlobContent?> LoadBlobAsync(
-        Guid repoId,
-        string commitSha,
+        ReanchorSession session,
         string path,
-        Dictionary<string, BlobContent> cache,
         CancellationToken ct)
     {
-        if (cache.TryGetValue(path, out var cached))
+        if (session.Blobs.TryGetValue(path, out var cached))
         {
             return IsCommentable(cached) ? cached : null;
         }
@@ -309,14 +331,14 @@ public sealed class AnchorService(AppDbContext db, DiffService diffService)
         BlobContent blob;
         try
         {
-            blob = await diffService.GetBlobAsync(repoId, commitSha, path, ct);
+            blob = await diffService.GetBlobAsync(session.RepoId, session.ToHead, path, ct);
         }
         catch (ApiException)
         {
             return null;
         }
 
-        cache[path] = blob;
+        session.Blobs[path] = blob;
         return IsCommentable(blob) ? blob : null;
     }
 
@@ -404,6 +426,30 @@ public sealed class AnchorService(AppDbContext db, DiffService diffService)
     }
 
     /// <summary>
+    /// 还原评论的既有字段并清除跟踪状态，避免失败后残留部分修改。
+    /// </summary>
+    /// <param name="comments">本次处理的评论</param>
+    /// <param name="snapshots">处理前的字段快照</param>
+    private void RestoreSnapshots(
+        IReadOnlyList<Comment> comments,
+        Dictionary<Guid, CommentSnapshot> snapshots)
+    {
+        foreach (var comment in comments)
+        {
+            if (!snapshots.TryGetValue(comment.Id, out var snapshot))
+            {
+                continue;
+            }
+
+            comment.Status = snapshot.Status;
+            comment.FilePath = snapshot.FilePath;
+            comment.LineNumber = snapshot.LineNumber;
+            comment.BlobSha = snapshot.BlobSha;
+            db.Entry(comment).State = EntityState.Unchanged;
+        }
+    }
+
+    /// <summary>
     /// 把评论标记为失效。
     /// </summary>
     /// <param name="comment">评论</param>
@@ -413,6 +459,63 @@ public sealed class AnchorService(AppDbContext db, DiffService diffService)
         comment.Status = CommentStatus.Outdated;
         return ReanchorOutcome.Outdated;
     }
+
+    /// <summary>
+    /// 一次重新锚定中复用的上下文：仓库、新旧 head、文件变更与按文件缓存的 blob 数据。
+    /// </summary>
+    /// <param name="RepoId">仓库主键</param>
+    /// <param name="FromHead">旧版本 head</param>
+    /// <param name="ToHead">新版本 head</param>
+    /// <param name="Changes">版本间全部文件变更</param>
+    private sealed class ReanchorSession(
+        Guid RepoId,
+        string FromHead,
+        string ToHead,
+        IReadOnlyList<DiffFile> Changes)
+    {
+        /// <summary>
+        /// 仓库主键。
+        /// </summary>
+        public Guid RepoId { get; } = RepoId;
+
+        /// <summary>
+        /// 旧版本 head。
+        /// </summary>
+        public string FromHead { get; } = FromHead;
+
+        /// <summary>
+        /// 新版本 head。
+        /// </summary>
+        public string ToHead { get; } = ToHead;
+
+        /// <summary>
+        /// 版本间全部文件变更。
+        /// </summary>
+        public IReadOnlyList<DiffFile> Changes { get; } = Changes;
+
+        /// <summary>
+        /// 按（提交, 路径）缓存的 blob id，缺失的文件也缓存为 null。
+        /// </summary>
+        public Dictionary<(string CommitSha, string Path), string?> BlobShas { get; } = new();
+
+        /// <summary>
+        /// 按路径缓存的新版本文件内容。
+        /// </summary>
+        public Dictionary<string, BlobContent> Blobs { get; } = new(StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// 评论处理前的字段快照，用于失败回滚。
+    /// </summary>
+    /// <param name="Status">评论状态</param>
+    /// <param name="FilePath">文件路径</param>
+    /// <param name="LineNumber">行号</param>
+    /// <param name="BlobSha">blob id</param>
+    private sealed record CommentSnapshot(
+        CommentStatus Status,
+        string FilePath,
+        int LineNumber,
+        string BlobSha);
 
     /// <summary>
     /// 单条评论的重新锚定结果。
