@@ -44,6 +44,8 @@ ConfigureDataProtection(builder);
 builder.Services.AddSingleton<CredentialProtector>();
 builder.Services.AddSingleton<GitCli>();
 builder.Services.AddSingleton<MirrorService>();
+builder.Services.AddSingleton<DiffCache>();
+builder.Services.AddSingleton<DiffService>();
 builder.Services.AddSingleton<SyncThrottle>();
 builder.Services.AddSingleton<MirrorSyncWorker>();
 
@@ -159,6 +161,7 @@ api.MapUsersEndpoints();
 api.MapReposEndpoints();
 api.MapBranchEndpoints();
 api.MapReviewsEndpoints();
+api.MapDiffEndpoints();
 api.MapSyncEndpoints();
 
 app.Run();

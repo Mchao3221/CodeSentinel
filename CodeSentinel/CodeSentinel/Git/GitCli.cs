@@ -89,6 +89,42 @@ public sealed class GitCli
         GitCredentials? credentials,
         CancellationToken ct)
     {
+        var (exitCode, stdOut, stdErr) = await RunCoreAsync(workDir, args, credentials, ct);
+        return new GitResult(exitCode, Encoding.UTF8.GetString(stdOut), stdErr);
+    }
+
+    /// <summary>
+    /// 执行一条 git 命令，标准输出按原始字节返回，供读取二进制 blob 使用。
+    /// </summary>
+    /// <param name="workDir">工作目录，不存在时自动创建</param>
+    /// <param name="args">git 参数，逐项传给 ProcessStartInfo.ArgumentList</param>
+    /// <param name="credentials">只读凭据，为空时不注入 askpass</param>
+    /// <param name="ct">取消令牌，取消时终止整个进程树</param>
+    /// <returns>退出码与原始标准输出/标准错误</returns>
+    public async Task<GitRawResult> RunRawAsync(
+        string workDir,
+        IReadOnlyList<string> args,
+        GitCredentials? credentials,
+        CancellationToken ct)
+    {
+        var (exitCode, stdOut, stdErr) = await RunCoreAsync(workDir, args, credentials, ct);
+        return new GitRawResult(exitCode, stdOut, stdErr);
+    }
+
+    /// <summary>
+    /// 启动 git 进程并读取原始标准输出与文本标准错误，供 RunAsync 与 RunRawAsync 复用。
+    /// </summary>
+    /// <param name="workDir">工作目录</param>
+    /// <param name="args">git 参数</param>
+    /// <param name="credentials">只读凭据</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>退出码、原始标准输出与标准错误</returns>
+    private async Task<(int ExitCode, byte[] StdOut, string StdErr)> RunCoreAsync(
+        string workDir,
+        IReadOnlyList<string> args,
+        GitCredentials? credentials,
+        CancellationToken ct)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(workDir);
         ArgumentNullException.ThrowIfNull(args);
         Directory.CreateDirectory(workDir);
@@ -104,7 +140,7 @@ public sealed class GitCli
         }
 
         // 先异步读取管道，避免输出过多时子进程阻塞
-        var stdOutTask = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
+        var stdOutTask = ReadAllBytesAsync(process.StandardOutput.BaseStream, CancellationToken.None);
         var stdErrTask = process.StandardError.ReadToEndAsync(CancellationToken.None);
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -112,21 +148,21 @@ public sealed class GitCli
 
         if (!await WaitForExitAsync(process, stdOutTask, stdErrTask, ct, timeout.Token))
         {
-            return new GitResult(TimeoutExitCode, await stdOutTask, TimeoutMessage);
+            return (TimeoutExitCode, await stdOutTask, TimeoutMessage);
         }
 
         var stdOut = await stdOutTask;
         var stdErr = await stdErrTask;
-        var result = new GitResult(process.ExitCode, stdOut, stdErr);
-        if (result.ExitCode != 0)
+        var exitCode = process.ExitCode;
+        if (exitCode != 0)
         {
             _logger.LogWarning(
                 "git 执行失败（退出码 {ExitCode}）：{Error}",
-                result.ExitCode,
-                Redact(result.StdErr, credentials));
+                exitCode,
+                Redact(stdErr, credentials));
         }
 
-        return result;
+        return (exitCode, stdOut, stdErr);
     }
 
     /// <summary>
@@ -140,8 +176,8 @@ public sealed class GitCli
     /// <returns>是否在超时前正常退出</returns>
     private static async Task<bool> WaitForExitAsync(
         Process process,
-        Task<string> stdOutTask,
-        Task<string> stdErrTask,
+        Task stdOutTask,
+        Task stdErrTask,
         CancellationToken ct,
         CancellationToken timeoutToken)
     {
@@ -248,7 +284,7 @@ public sealed class GitCli
     /// </summary>
     /// <param name="stdOutTask">标准输出读取任务</param>
     /// <param name="stdErrTask">标准错误读取任务</param>
-    private static async Task DrainAsync(Task<string> stdOutTask, Task<string> stdErrTask)
+    private static async Task DrainAsync(Task stdOutTask, Task stdErrTask)
     {
         try
         {
@@ -258,6 +294,19 @@ public sealed class GitCli
         {
             // 进程被终止后管道读取可能抛出异常，不影响调用方判断
         }
+    }
+
+    /// <summary>
+    /// 把流中的全部原始字节读入内存，供二进制标准输出使用。
+    /// </summary>
+    /// <param name="stream">输入流</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>原始字节</returns>
+    private static async Task<byte[]> ReadAllBytesAsync(Stream stream, CancellationToken ct)
+    {
+        using var memory = new MemoryStream();
+        await stream.CopyToAsync(memory, ct);
+        return memory.ToArray();
     }
 
     /// <summary>

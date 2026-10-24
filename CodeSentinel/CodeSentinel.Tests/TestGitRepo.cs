@@ -146,6 +146,74 @@ public sealed class TestGitRepo : IDisposable
     }
 
     /// <summary>
+    /// 从 main 拉出新分支并推送到远端，但不产生任何文件变更（空提交），供精确构造 diff 场景。
+    /// </summary>
+    /// <param name="branchName">分支名</param>
+    /// <returns>新分支的提交 SHA</returns>
+    public async Task<string> CreateBranchFromMainAsync(string branchName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(branchName);
+
+        await RunGitAsync(WorkPath, ["checkout", "-b", branchName, "main"]);
+        await RunGitAsync(WorkPath, ["commit", "--allow-empty", "-m", $"branch {branchName}"]);
+        await RunGitAsync(WorkPath, ["push", "origin", branchName]);
+        var sha = (await RunGitAsync(WorkPath, ["rev-parse", "HEAD"])).Trim();
+        await RunGitAsync(WorkPath, ["checkout", "main"]);
+        return sha;
+    }
+
+    /// <summary>
+    /// 在指定分支上执行一组文件操作并提交推送：写入/覆盖文件、删除文件与重命名文件。
+    /// </summary>
+    /// <param name="branch">分支名</param>
+    /// <param name="writes">相对路径到文件字节内容，创建或覆盖文件，支持中文路径与二进制内容</param>
+    /// <param name="deletes">待删除的相对路径列表</param>
+    /// <param name="renames">待重命名的旧路径到新路径列表</param>
+    /// <param name="message">提交信息</param>
+    /// <returns>提交后的分支 SHA</returns>
+    public async Task<string> CommitChangesAsync(
+        string branch,
+        IReadOnlyDictionary<string, byte[]> writes,
+        IReadOnlyList<string>? deletes = null,
+        IReadOnlyList<(string OldPath, string NewPath)>? renames = null,
+        string message = "changes")
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(branch);
+
+        await RunGitAsync(WorkPath, ["checkout", branch]);
+
+        foreach (var (path, content) in writes)
+        {
+            var fullPath = Path.Combine(WorkPath, path.Replace('/', Path.DirectorySeparatorChar));
+            var directory = Path.GetDirectoryName(fullPath);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            await File.WriteAllBytesAsync(fullPath, content);
+        }
+
+        foreach (var path in deletes ?? [])
+        {
+            await RunGitAsync(WorkPath, ["rm", "-q", "--", path]);
+        }
+
+        foreach (var (oldPath, newPath) in renames ?? [])
+        {
+            await RunGitAsync(WorkPath, ["mv", oldPath, newPath]);
+        }
+
+        await RunGitAsync(WorkPath, ["add", "-A"]);
+        await RunGitAsync(WorkPath, ["commit", "-m", message]);
+        await RunGitAsync(WorkPath, ["push", "origin", branch]);
+
+        var sha = (await RunGitAsync(WorkPath, ["rev-parse", "HEAD"])).Trim();
+        await RunGitAsync(WorkPath, ["checkout", "main"]);
+        return sha;
+    }
+
+    /// <summary>
     /// 在指定工作目录执行 git 命令，失败时抛出包含标准错误的异常。
     /// </summary>
     /// <param name="workDir">工作目录</param>

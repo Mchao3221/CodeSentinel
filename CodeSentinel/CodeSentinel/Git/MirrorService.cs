@@ -257,6 +257,33 @@ public sealed class MirrorService
     }
 
     /// <summary>
+    /// 计算两个提交的合并基，供三点 diff 的 OLD 侧 blob 读取使用；不存在时返回 null。
+    /// </summary>
+    /// <param name="repoId">仓库主键</param>
+    /// <param name="a">提交 A</param>
+    /// <param name="b">提交 B</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>合并基提交 SHA 或 null</returns>
+    public async Task<string?> GetMergeBaseAsync(
+        Guid repoId,
+        string a,
+        string b,
+        CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(a);
+        ArgumentException.ThrowIfNullOrWhiteSpace(b);
+
+        var result = await _git.RunAsync(
+            GetMirrorPath(repoId),
+            ["merge-base", a, b],
+            null,
+            ct);
+
+        var sha = result.StdOut.Trim();
+        return result.ExitCode == 0 && sha.Length > 0 ? sha : null;
+    }
+
+    /// <summary>
     /// 把 git 输出解析为分支列表，忽略 origin/HEAD 与非法行。
     /// </summary>
     /// <param name="stdOut">for-each-ref 输出</param>
