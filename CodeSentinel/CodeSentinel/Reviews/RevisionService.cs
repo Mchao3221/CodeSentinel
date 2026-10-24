@@ -240,6 +240,8 @@ public sealed class RevisionService(
                 .SetProperty(r => r.HeadSha, newHeadSha)
                 .SetProperty(r => r.Status, ReviewStatus.Open)
                 .SetProperty(r => r.ApprovedAt, (DateTime?)null)
+                .SetProperty(r => r.MergeHint, false)
+                .SetProperty(r => r.MergeHintCount, 0)
                 .SetProperty(r => r.UpdatedAt, now), ct);
 
         return affected > 0;

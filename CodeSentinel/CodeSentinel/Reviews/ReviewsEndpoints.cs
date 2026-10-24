@@ -32,6 +32,7 @@ public static class ReviewsEndpoints
         group.MapPost("/{id:guid}/refresh", RefreshReviewAsync);
         group.MapPost("/{id:guid}/decisions", DecideReviewAsync);
         group.MapPost("/{id:guid}/close", CloseReviewAsync);
+        group.MapPost("/{id:guid}/mark-merged", MarkMergedAsync);
         group.MapPost("/{id:guid}/reviewers", AddReviewersAsync);
         group.MapDelete("/{id:guid}/reviewers/{userId:guid}", RemoveReviewerAsync);
     }
@@ -135,6 +136,32 @@ public static class ReviewsEndpoints
         var userId = CurrentUser.RequireId(httpContext);
 
         await reviewService.CloseAsync(id, userId, request.Reason, ct);
+        return await BuildDetailResultAsync(
+            reviewService, id, userId, CurrentUser.IsAdmin(httpContext), ct);
+    }
+
+    /// <summary>
+    /// 手工标记评审单为已合并，返回更新后的评审单详情。
+    /// </summary>
+    /// <param name="id">评审单主键</param>
+    /// <param name="request">标记请求</param>
+    /// <param name="mergeDetectionService">合并检测服务</param>
+    /// <param name="reviewService">评审单服务</param>
+    /// <param name="httpContext">HTTP 上下文</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>评审单详情</returns>
+    private static async Task<IResult> MarkMergedAsync(
+        Guid id,
+        MarkMergedRequest request,
+        MergeDetectionService mergeDetectionService,
+        ReviewService reviewService,
+        HttpContext httpContext,
+        CancellationToken ct)
+    {
+        var userId = CurrentUser.RequireId(httpContext);
+
+        await mergeDetectionService.MarkMergedManuallyAsync(
+            id, userId, request.MergeCommitSha, ct);
         return await BuildDetailResultAsync(
             reviewService, id, userId, CurrentUser.IsAdmin(httpContext), ct);
     }

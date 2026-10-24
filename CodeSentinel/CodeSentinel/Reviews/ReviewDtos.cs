@@ -40,6 +40,12 @@ public sealed record DecideReviewRequest(ReviewerState? State, string? Note);
 public sealed record CloseReviewRequest(string? Reason);
 
 /// <summary>
+/// 手工标记评审单已合并请求。
+/// </summary>
+/// <param name="MergeCommitSha">合并提交，可选；未提供时取目标分支 head</param>
+public sealed record MarkMergedRequest(string? MergeCommitSha);
+
+/// <summary>
 /// 新增审核人请求。
 /// </summary>
 /// <param name="UserIds">待新增的审核人主键列表</param>

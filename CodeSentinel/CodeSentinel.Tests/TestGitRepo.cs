@@ -163,6 +163,33 @@ public sealed class TestGitRepo : IDisposable
     }
 
     /// <summary>
+    /// 把指定分支以 --no-ff 方式合并进 main 并推送，用于模拟评审通过后的合并。
+    /// </summary>
+    /// <param name="branchName">待合并的分支名</param>
+    /// <returns>合并后 main 的提交 SHA</returns>
+    public async Task<string> MergeBranchIntoMainAsync(string branchName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(branchName);
+
+        await RunGitAsync(WorkPath, ["checkout", "main"]);
+        await RunGitAsync(WorkPath, ["merge", "--no-ff", "-m", $"merge {branchName}", branchName]);
+        await RunGitAsync(WorkPath, ["push", "origin", "main"]);
+        return (await RunGitAsync(WorkPath, ["rev-parse", "HEAD"])).Trim();
+    }
+
+    /// <summary>
+    /// 删除远端分支并保留本地工作副本，用于模拟评审分支被删除。
+    /// </summary>
+    /// <param name="branchName">待删除的分支名</param>
+    /// <returns></returns>
+    public async Task DeleteRemoteBranchAsync(string branchName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(branchName);
+
+        await RunGitAsync(WorkPath, ["push", "origin", "--delete", branchName]);
+    }
+
+    /// <summary>
     /// 在指定分支上执行一组文件操作并提交推送：写入/覆盖文件、删除文件与重命名文件。
     /// </summary>
     /// <param name="branch">分支名</param>

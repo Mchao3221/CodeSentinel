@@ -106,6 +106,7 @@ public sealed class MirrorSyncWorker : BackgroundService
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var revisionService = scope.ServiceProvider.GetRequiredService<RevisionService>();
+        var mergeDetectionService = scope.ServiceProvider.GetRequiredService<MergeDetectionService>();
         var now = DateTime.UtcNow;
 
         var repos = await db.Repos
@@ -135,7 +136,7 @@ public sealed class MirrorSyncWorker : BackgroundService
 
             try
             {
-                await SyncOneAsync(db, repo, revisionService, ct);
+                await SyncOneAsync(db, repo, revisionService, mergeDetectionService, ct);
             }
             finally
             {
@@ -165,12 +166,14 @@ public sealed class MirrorSyncWorker : BackgroundService
     /// <param name="db">数据库上下文</param>
     /// <param name="repo">待同步仓库</param>
     /// <param name="revisionService">评审版本服务，fetch 成功后跟进新提交</param>
+    /// <param name="mergeDetectionService">合并检测服务，版本同步成功后跟进合并状态</param>
     /// <param name="ct">取消令牌</param>
     /// <returns>同步任务</returns>
     private async Task SyncOneAsync(
         AppDbContext db,
         Repo repo,
         RevisionService revisionService,
+        MergeDetectionService mergeDetectionService,
         CancellationToken ct)
     {
         GitCredentials? credentials = null;
@@ -181,7 +184,12 @@ public sealed class MirrorSyncWorker : BackgroundService
             await _mirrorService.FetchAsync(repo.Id, repo.GitUrl, credentials, ct);
             ApplySuccess(repo);
             await db.SaveChangesAsync(ct);
-            await SyncActiveReviewsSafelyAsync(revisionService, repo, ct);
+
+            // 版本同步成功后再检测合并与分支删除，避免用旧分支信息误判
+            if (await SyncActiveReviewsSafelyAsync(revisionService, repo, ct))
+            {
+                await SyncMergeStatesSafelyAsync(mergeDetectionService, repo, ct);
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -214,6 +222,7 @@ public sealed class MirrorSyncWorker : BackgroundService
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var revisionService = scope.ServiceProvider.GetRequiredService<RevisionService>();
+        var mergeDetectionService = scope.ServiceProvider.GetRequiredService<MergeDetectionService>();
         var repo = await db.Repos.AsNoTracking()
             .FirstOrDefaultAsync(m => m.Id == repoId, ct)
             ?? throw RepositoryNotFound();
@@ -236,6 +245,7 @@ public sealed class MirrorSyncWorker : BackgroundService
             await _mirrorService.FetchAsync(repo.Id, repo.GitUrl, credentials, ct);
             await MarkSyncedAsync(db, repo.Id, ct);
             await revisionService.SyncActiveReviewsAsync(repo.Id, ct);
+            await SyncMergeStatesSafelyAsync(mergeDetectionService, repo, ct);
         }
         finally
         {
@@ -249,8 +259,8 @@ public sealed class MirrorSyncWorker : BackgroundService
     /// <param name="revisionService">评审版本服务</param>
     /// <param name="repo">已同步仓库</param>
     /// <param name="ct">取消令牌</param>
-    /// <returns></returns>
-    private async Task SyncActiveReviewsSafelyAsync(
+    /// <returns>是否成功完成版本同步</returns>
+    private async Task<bool> SyncActiveReviewsSafelyAsync(
         RevisionService revisionService,
         Repo repo,
         CancellationToken ct)
@@ -258,6 +268,7 @@ public sealed class MirrorSyncWorker : BackgroundService
         try
         {
             await revisionService.SyncActiveReviewsAsync(repo.Id, ct);
+            return true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -268,6 +279,37 @@ public sealed class MirrorSyncWorker : BackgroundService
             _logger.LogWarning(
                 ex,
                 "仓库 {RepoName}（{RepoId}）评审版本同步失败，本轮镜像同步仍视为成功",
+                repo.Name,
+                repo.Id);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 跟进仓库的合并状态与分支删除；失败只记录日志，不影响镜像同步结果与退避。
+    /// </summary>
+    /// <param name="mergeDetectionService">合并检测服务</param>
+    /// <param name="repo">已同步仓库</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns></returns>
+    private async Task SyncMergeStatesSafelyAsync(
+        MergeDetectionService mergeDetectionService,
+        Repo repo,
+        CancellationToken ct)
+    {
+        try
+        {
+            await mergeDetectionService.SyncReviewMergeStatesAsync(repo.Id, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "仓库 {RepoName}（{RepoId}）合并状态同步失败，本轮镜像同步仍视为成功",
                 repo.Name,
                 repo.Id);
         }
