@@ -60,6 +60,15 @@ test.describe('CodeSentinel 评审闭环', () => {
     await expect(submitter.locator('.review-header-title')).toHaveText('实现登录限流');
     await expect(submitter.locator('.review-header-title-row .el-tag')).toHaveText('评审中');
 
+    // 夹具已校验并记录创建载荷，这里复核关键字段
+    expect(state.lastCreateReview).toMatchObject({
+      repoId: 'repo-1',
+      baseBranch: 'main',
+      headBranch: 'feature/login-rate-limit',
+      title: '实现登录限流',
+      reviewerIds: ['u-reviewer'],
+    });
+
     // 展开 diff：一个上下文行 + 一个新增行，新增行上写行内评论
     await submitter.locator('.diff-file-toggle').click();
     await expect(submitter.locator('.diff-hunk-header')).toContainText('@@ -1,1 +1,2 @@');
@@ -69,6 +78,15 @@ test.describe('CodeSentinel 评审闭环', () => {
     await submitter.locator('.comment-composer-input textarea').fill('请补充最大尝试次数的配置来源');
     await submitter.locator('.comment-composer-submit').click();
     await expect(submitter.locator('.comment-body')).toContainText('请补充最大尝试次数的配置来源');
+
+    // 夹具已校验并记录评论载荷，这里复核锚点与内容
+    expect(state.lastCreateComment).toMatchObject({
+      path: 'src/auth/login.ts',
+      side: 'NEW',
+      line: 2,
+      body: '请补充最大尝试次数的配置来源',
+    });
+    expect(state.lastCreateComment?.parentId ?? null).toBeNull();
 
     // 审核人从“待我评审”列表进入详情，能看到同一行评论
     await reviewer.goto('/reviews');

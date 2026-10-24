@@ -2,6 +2,8 @@ import type { BrowserContext, Route } from '@playwright/test';
 
 import type {
   AuthUser,
+  CreateCommentInput,
+  CreateReviewInput,
   DiffFile,
   DiffFileList,
   Paginated,
@@ -115,6 +117,10 @@ export interface ReviewApiState {
   fileViewed: boolean;
   /** 下一条评论序号 */
   nextCommentId: number;
+  /** 最近一次创建评审的请求载荷，供用例断言 */
+  lastCreateReview: CreateReviewInput | null;
+  /** 最近一次创建评论或回复的请求载荷，供用例断言 */
+  lastCreateComment: CreateCommentInput | null;
 }
 
 /**
@@ -138,6 +144,8 @@ export function createReviewApiState(): ReviewApiState {
     mergeCommitSha: null,
     fileViewed: false,
     nextCommentId: 1,
+    lastCreateReview: null,
+    lastCreateComment: null,
   };
 }
 
@@ -333,25 +341,84 @@ function paginated<T>(items: T[]): Paginated<T> {
 }
 
 /**
+ * 校验创建评审请求，返回错误信息，合法时返回 null。
+ */
+function validateCreateReview(body: CreateReviewInput): string | null {
+  if (typeof body.repoId !== 'string' || body.repoId === '') {
+    return 'repoId 必须是非空仓库主键';
+  }
+
+  if (typeof body.baseBranch !== 'string' || body.baseBranch === '') {
+    return 'baseBranch 必须是非空分支名';
+  }
+
+  if (typeof body.headBranch !== 'string' || body.headBranch === '') {
+    return 'headBranch 必须是非空分支名';
+  }
+
+  if (typeof body.title !== 'string' || body.title === '') {
+    return 'title 必须是非空标题';
+  }
+
+  if (!Array.isArray(body.reviewerIds) || body.reviewerIds.length !== 1) {
+    return 'reviewerIds 必须恰好包含一名审核人';
+  }
+
+  if (typeof body.reviewerIds[0] !== 'string' || body.reviewerIds[0] === '') {
+    return 'reviewerId 必须是非空用户主键';
+  }
+
+  return null;
+}
+
+/**
+ * 校验创建评论或回复请求，返回错误信息，合法时返回 null。
+ */
+function validateCreateComment(body: CreateCommentInput): string | null {
+  if (typeof body.path !== 'string' || body.path === '') {
+    return 'path 必须是非空文件路径';
+  }
+
+  if (body.side !== 'OLD' && body.side !== 'NEW') {
+    return 'side 必须是 OLD 或 NEW';
+  }
+
+  if (typeof body.line !== 'number' || body.line < 1) {
+    return 'line 必须是正整数';
+  }
+
+  if (typeof body.body !== 'string' || body.body === '') {
+    return 'body 必须是非空评论内容';
+  }
+
+  if (
+    body.parentId !== undefined
+    && body.parentId !== null
+    && (typeof body.parentId !== 'string' || body.parentId === '')
+  ) {
+    return 'parentId 必须是非空评论主键';
+  }
+
+  return null;
+}
+
+/**
  * 处理创建评审请求。
  */
 async function handleCreateReview(route: Route, state: ReviewApiState): Promise<void> {
-  const body = route.request().postDataJSON() as {
-    title: string;
-    description?: string;
-    reviewerIds: string[];
-  };
+  const body = route.request().postDataJSON() as CreateReviewInput;
 
-  // 只支持单审核人，保证夹具简单且与页面选择一致
-  if (body.reviewerIds.length !== 1) {
+  const error = validateCreateReview(body);
+  if (error !== null) {
     await fulfillJson(
       route,
-      { code: 'E2E_INVALID_REVIEWERS', message: '冒烟夹具只支持单审核人', traceId: 'e2e' },
+      { code: 'E2E_INVALID_CREATE_REVIEW', message: error, traceId: 'e2e' },
       400,
     );
     return;
   }
 
+  state.lastCreateReview = body;
   state.reviewCreated = true;
   state.title = body.title;
   state.description = body.description ?? '';
@@ -447,13 +514,19 @@ async function handleCreateComment(
   state: ReviewApiState,
   user: E2EUser,
 ): Promise<void> {
-  const body = route.request().postDataJSON() as {
-    path: string;
-    side: 'OLD' | 'NEW';
-    line: number;
-    body: string;
-    parentId?: string;
-  };
+  const body = route.request().postDataJSON() as CreateCommentInput;
+
+  const error = validateCreateComment(body);
+  if (error !== null) {
+    await fulfillJson(
+      route,
+      { code: 'E2E_INVALID_CREATE_COMMENT', message: error, traceId: 'e2e' },
+      400,
+    );
+    return;
+  }
+
+  state.lastCreateComment = body;
   const comment: ReviewComment = {
     id: `comment-${state.nextCommentId}`,
     revisionId: state.revisions[state.revisions.length - 1].id,
