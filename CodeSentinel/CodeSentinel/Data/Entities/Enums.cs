@@ -147,7 +147,12 @@ public enum NotificationType
     /// <summary>
     /// 收到评论回复。
     /// </summary>
-    CommentReply
+    CommentReply,
+
+    /// <summary>
+    /// 评审单上的审核人被移出，需要提交人补人。
+    /// </summary>
+    ReviewerRemoved
 }
 
 /// <summary>

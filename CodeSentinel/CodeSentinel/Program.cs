@@ -1,16 +1,27 @@
+using CodeSentinel.Audit;
+using CodeSentinel.Auth;
 using CodeSentinel.Common;
 using CodeSentinel.Data;
+using CodeSentinel.Users;
+using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
 const string DefaultConnectionString = "Data Source=data/codesentinel.db";
+const int DefaultSessionHours = 8;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // 启动时确保 SQLite 数据库所在目录存在
 EnsureDatabaseDirectory(builder);
+
+var sessionHours = builder.Configuration.GetValue("Auth:SessionHours", DefaultSessionHours);
+if (sessionHours <= 0)
+{
+    sessionHours = DefaultSessionHours;
+}
 
 builder.Services.AddOpenApi();
 builder.Services.AddDbContext<AppDbContext>(options =>
@@ -20,7 +31,55 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseUpper)));
 
+// CSRF：前端从 GET /api/auth/csrf 取令牌，放在 X-CSRF-TOKEN 请求头
+builder.Services.AddAntiforgery(options =>
+{
+    options.HeaderName = "X-CSRF-TOKEN";
+    options.Cookie.Name = "CodeSentinel.Csrf";
+    options.Cookie.HttpOnly = true;
+    options.Cookie.SameSite = SameSiteMode.Lax;
+});
+
+builder.Services
+    .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
+    {
+        options.Cookie.Name = "CodeSentinel.Auth";
+        options.Cookie.HttpOnly = true;
+        options.Cookie.SameSite = SameSiteMode.Lax;
+        options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+        options.ExpireTimeSpan = TimeSpan.FromHours(sessionHours);
+        options.SlidingExpiration = false;
+
+        // 接口不跳转登录页，统一返回错误形状
+        options.Events.OnRedirectToLogin = context => WriteAuthErrorAsync(
+            context.HttpContext,
+            StatusCodes.Status401Unauthorized,
+            "UNAUTHENTICATED",
+            "未登录");
+        options.Events.OnRedirectToAccessDenied = context => WriteAuthErrorAsync(
+            context.HttpContext,
+            StatusCodes.Status403Forbidden,
+            "FORBIDDEN",
+            "无权访问");
+    });
+
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy(CurrentUser.AdminRole, policy => policy.RequireRole(CurrentUser.AdminRole));
+});
+
+builder.Services.AddScoped<PasswordAuthService>();
+builder.Services.AddScoped<AuditService>();
+builder.Services.AddScoped<CsrfEndpointFilter>();
+
 var app = builder.Build();
+
+// 非测试环境：执行迁移并在无管理员时生成一次性初始化口令
+if (!app.Environment.IsEnvironment("Testing"))
+{
+    await AdminBootstrap.EnsureAsync(app.Services, app.Environment);
+}
 
 if (app.Environment.IsDevelopment())
 {
@@ -45,7 +104,20 @@ app.UseStatusCodePages(async statusCodeContext =>
     await context.Response.WriteAsJsonAsync(new { code, message, traceId = context.TraceIdentifier });
 });
 
-app.MapGet("/api/health", () => new { status = "ok" });
+app.UseAuthentication();
+
+// 待改密用户只能访问改密相关接口
+app.UseMiddleware<PasswordChangeRequiredMiddleware>();
+
+app.UseAuthorization();
+
+// 全部业务端点挂在 /api 下，统一应用 CSRF 端点过滤器
+var api = app.MapGroup("/api");
+api.AddEndpointFilter<CsrfEndpointFilter>();
+api.MapGet("/health", () => new { status = "ok" });
+api.MapAuthEndpoints(sessionHours);
+api.MapAdminSetupEndpoint();
+api.MapUsersEndpoints();
 
 app.Run();
 
@@ -68,6 +140,13 @@ static void EnsureDatabaseDirectory(WebApplicationBuilder builder)
     {
         Directory.CreateDirectory(directory);
     }
+}
+
+// 用统一错误形状写出认证/授权失败响应
+static async Task WriteAuthErrorAsync(HttpContext context, int status, string code, string message)
+{
+    context.Response.StatusCode = status;
+    await context.Response.WriteAsJsonAsync(new { code, message, traceId = context.TraceIdentifier });
 }
 
 /// <summary>
