@@ -258,11 +258,11 @@ describe('DiffFile', () => {
     const toggle = wrapper.find('.diff-outdated-toggle');
     expect(toggle.exists()).toBe(true);
     expect(toggle.text()).toContain('已过期');
-    expect(wrapper.find('.diff-outdated-body').exists()).toBe(false);
+    expect(wrapper.find('.comment-body').exists()).toBe(false);
 
     await toggle.trigger('click');
     await flushPromises();
-    expect(wrapper.find('.diff-outdated-body').text()).toBe('过期评论内容');
+    expect(wrapper.find('.comment-body').text()).toBe('过期评论内容');
   });
 
   it('高亮失败或文件过大时回退纯文本', async () => {

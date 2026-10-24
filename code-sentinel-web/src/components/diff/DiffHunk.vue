@@ -15,6 +15,25 @@ const props = defineProps<{
   newTokens: LineTokens | null;
   /** 行内评论索引，键为 side:line */
   commentsByKey: ReadonlyMap<string, ReviewComment[]>;
+  /** 评审单主键 */
+  reviewId: string;
+  /** 文件路径 */
+  path: string;
+  /** 是否历史版本，历史版本只读 */
+  isHistorical: boolean;
+  /** 当前登录用户主键 */
+  currentUserId: string;
+  /** 当前用户是否管理员 */
+  isAdmin: boolean;
+  /** 当前用户是否为仓库合并人 */
+  isMerger: boolean;
+}>();
+
+const emit = defineEmits<{
+  /** 新建评论成功 */
+  created: [comment: ReviewComment];
+  /** 评论被编辑、删除或解决状态变化 */
+  updated: [comment: ReviewComment];
 }>();
 
 /**
@@ -47,6 +66,22 @@ function commentsFor(line: DiffLine): ReviewComment[] {
 
   return result;
 }
+
+/**
+ * 向上转发评论创建事件。
+ * @param comment 新建的评论
+ */
+function onCreated(comment: ReviewComment): void {
+  emit('created', comment);
+}
+
+/**
+ * 向上转发评论更新事件。
+ * @param comment 更新后的评论
+ */
+function onUpdated(comment: ReviewComment): void {
+  emit('updated', comment);
+}
 </script>
 
 <template>
@@ -62,6 +97,14 @@ function commentsFor(line: DiffLine): ReviewComment[] {
           :line="line"
           :tokens="tokensFor(line)"
           :comments="commentsFor(line)"
+          :review-id="reviewId"
+          :path="path"
+          :is-historical="isHistorical"
+          :current-user-id="currentUserId"
+          :is-admin="isAdmin"
+          :is-merger="isMerger"
+          @created="onCreated"
+          @updated="onUpdated"
         />
       </tbody>
     </table>

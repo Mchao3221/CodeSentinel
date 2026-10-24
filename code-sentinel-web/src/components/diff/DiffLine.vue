@@ -1,20 +1,60 @@
 <script setup lang="ts">
 /**
- * diff 行：三列（旧行号、新行号、带前缀标记的内容）并在其下渲染行内评论。
+ * diff 行：三列（旧行号、新行号、带前缀标记的内容）与评论操作列，并在其下渲染行内评论线程与输入框。
  */
-import { computed } from 'vue';
+import { computed, nextTick, ref } from 'vue';
 
-import type { DiffLine, ReviewComment } from '../../api/types';
+import type { CommentSide, DiffLine, ReviewComment } from '../../api/types';
 import type { HighlightToken } from '../../composables/useHighlight';
-import { formatDateTime } from '../../utils/datetime';
+import CommentComposer from './CommentComposer.vue';
+import CommentThread from './CommentThread.vue';
 
-const props = defineProps<{
-  /** diff 行数据 */
-  line: DiffLine;
-  /** 高亮 token，null 表示回退纯文本 */
-  tokens: HighlightToken[] | null;
-  /** 挂在该行上的评论 */
-  comments: ReviewComment[];
+/**
+ * 评论锚点：评论所在侧与该侧文件中的行号。
+ */
+interface CommentAnchor {
+  /** 评论所在侧 */
+  side: CommentSide;
+  /** 该侧文件中的行号 */
+  line: number;
+}
+
+const props = withDefaults(
+  defineProps<{
+    /** diff 行数据 */
+    line: DiffLine;
+    /** 高亮 token，null 表示回退纯文本 */
+    tokens: HighlightToken[] | null;
+    /** 挂在该行上的评论 */
+    comments: ReviewComment[];
+    /** 评审单主键 */
+    reviewId?: string;
+    /** 文件路径 */
+    path?: string;
+    /** 是否历史版本，历史版本只读 */
+    isHistorical?: boolean;
+    /** 当前登录用户主键 */
+    currentUserId?: string;
+    /** 当前用户是否管理员 */
+    isAdmin?: boolean;
+    /** 当前用户是否为仓库合并人 */
+    isMerger?: boolean;
+  }>(),
+  {
+    reviewId: '',
+    path: '',
+    isHistorical: false,
+    currentUserId: '',
+    isAdmin: false,
+    isMerger: false,
+  },
+);
+
+const emit = defineEmits<{
+  /** 新建评论成功，交由列表插入本地状态 */
+  created: [comment: ReviewComment];
+  /** 评论被编辑、删除或解决状态变化 */
+  updated: [comment: ReviewComment];
 }>();
 
 /** 行类型到前缀标记的映射 */
@@ -23,6 +63,9 @@ const MARKERS: Record<DiffLine['type'], string> = {
   ADD: '+',
   DELETE: '-',
 };
+
+/** 是否正在为当前行编写评论 */
+const composing = ref(false);
 
 /** 行前缀标记 */
 const marker = computed(() => MARKERS[props.line.type]);
@@ -36,6 +79,21 @@ const lineTokens = computed(() => props.tokens ?? []);
 /** 是否渲染高亮 token */
 const hasTokens = computed(() => lineTokens.value.length > 0);
 
+/** 当前行的评论锚点：删除行取 OLD，上下文行与新增行取 NEW */
+const anchor = computed<CommentAnchor | null>(() => {
+  if (props.line.type === 'DELETE') {
+    return props.line.oldLine === null ? null : { side: 'OLD', line: props.line.oldLine };
+  }
+
+  return props.line.newLine === null ? null : { side: 'NEW', line: props.line.newLine };
+});
+
+/** 顶层评论线程，回复由线程组件按 parentId 递归渲染 */
+const threads = computed(() => props.comments.filter((comment) => comment.parentId === null));
+
+/** 是否显示评论按钮 */
+const canComment = computed(() => anchor.value !== null && !props.isHistorical);
+
 /**
  * 把 token 语义类别映射为固定 class。
  * @param token 高亮 token
@@ -46,21 +104,46 @@ function tokenClass(token: HighlightToken): string {
 }
 
 /**
- * 评论展示样式类，已解决与已删除单独区分。
- * @param comment 评论
- * @returns 样式类
+ * 打开或关闭当前行的评论输入框。
  */
-function commentClass(comment: ReviewComment): string {
-  return comment.status === 'RESOLVED' ? 'diff-comment diff-comment-resolved' : 'diff-comment';
+function toggleComposer(): void {
+  composing.value = !composing.value;
 }
 
 /**
- * 评论正文，已删除的评论替换为占位文案。
- * @param comment 评论
- * @returns 可展示正文
+ * 关闭当前行的评论输入框。
  */
-function commentBody(comment: ReviewComment): string {
-  return comment.status === 'DELETED' ? '该评论已删除' : comment.body;
+function cancelComposer(): void {
+  composing.value = false;
+}
+
+/**
+ * 向上转发线程创建的事件。
+ * @param comment 新建的评论
+ */
+function forwardCreated(comment: ReviewComment): void {
+  emit('created', comment);
+}
+
+/**
+ * 向上转发线程更新的事件。
+ * @param comment 更新后的评论
+ */
+function forwardUpdated(comment: ReviewComment): void {
+  emit('updated', comment);
+}
+
+/**
+ * 新建评论成功：关闭输入框、向上传递并滚动到该评论。
+ * @param comment 新建的评论
+ */
+async function onCreated(comment: ReviewComment): Promise<void> {
+  composing.value = false;
+  emit('created', comment);
+
+  await nextTick();
+  const element = document.querySelector(`[data-comment-id="${comment.id}"]`);
+  (element as HTMLElement | null)?.scrollIntoView?.({ block: 'center' });
 }
 </script>
 
@@ -82,17 +165,43 @@ function commentBody(comment: ReviewComment): string {
         <template v-else>{{ line.text }}</template>
       </span>
     </td>
+    <td class="diff-line-actions">
+      <button
+        v-if="canComment"
+        class="diff-comment-add"
+        type="button"
+        title="添加评论"
+        @click="toggleComposer"
+      >
+        +
+      </button>
+    </td>
   </tr>
-  <tr v-for="comment in comments" :key="comment.id" class="diff-comment-row">
-    <td colspan="3">
-      <div :class="commentClass(comment)">
-        <div class="diff-comment-meta">
-          <strong class="diff-comment-author">{{ comment.authorDisplayName }}</strong>
-          <span class="diff-comment-time">{{ formatDateTime(comment.createdAt) }}</span>
-          <span v-if="comment.status === 'RESOLVED'" class="diff-comment-resolved-label">已解决</span>
-        </div>
-        <div class="diff-comment-body">{{ commentBody(comment) }}</div>
-      </div>
+  <tr v-if="composing && anchor !== null" class="diff-composer-row">
+    <td colspan="4">
+      <CommentComposer
+        :review-id="reviewId"
+        :path="path"
+        :side="anchor.side"
+        :line="anchor.line"
+        @created="onCreated"
+        @cancel="cancelComposer"
+      />
+    </td>
+  </tr>
+  <tr v-for="comment in threads" :key="comment.id" class="diff-comment-row">
+    <td colspan="4">
+      <CommentThread
+        :review-id="reviewId"
+        :comment="comment"
+        :comments="comments"
+        :current-user-id="currentUserId"
+        :is-admin="isAdmin"
+        :is-merger="isMerger"
+        :is-historical="isHistorical"
+        @created="forwardCreated"
+        @updated="forwardUpdated"
+      />
     </td>
   </tr>
 </template>
@@ -120,6 +229,31 @@ function commentBody(comment: ReviewComment): string {
   padding: 0 8px;
   white-space: pre;
   vertical-align: top;
+}
+
+.diff-line-actions {
+  width: 28px;
+  min-width: 28px;
+  padding: 0 4px;
+  text-align: center;
+  vertical-align: top;
+}
+
+.diff-comment-add {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  color: var(--el-color-primary);
+  background-color: var(--el-color-primary-light-9);
+  cursor: pointer;
+  visibility: hidden;
+}
+
+.diff-line:hover .diff-comment-add,
+.diff-comment-add:focus {
+  visibility: visible;
 }
 
 .diff-line-add .diff-line-marker {
@@ -195,42 +329,19 @@ function commentBody(comment: ReviewComment): string {
   color: #24292e;
 }
 
+.diff-composer-row {
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.diff-composer-row td {
+  padding: 4px 8px;
+}
+
 .diff-comment-row {
   border-bottom: 1px solid var(--el-border-color-lighter);
 }
 
-.diff-comment {
-  margin: 4px 8px;
-  padding: 8px 12px;
-  border-left: 3px solid var(--el-color-primary);
-  background-color: var(--el-fill-color-light);
-}
-
-.diff-comment-resolved {
-  border-left-color: var(--el-color-success);
-  opacity: 0.75;
-}
-
-.diff-comment-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-}
-
-.diff-comment-author {
-  color: var(--el-text-color-primary);
-}
-
-.diff-comment-resolved-label {
-  color: var(--el-color-success);
-}
-
-.diff-comment-body {
-  margin-top: 4px;
-  color: var(--el-text-color-regular);
-  white-space: pre-wrap;
-  word-break: break-word;
+.diff-comment-row td {
+  padding: 4px 8px;
 }
 </style>

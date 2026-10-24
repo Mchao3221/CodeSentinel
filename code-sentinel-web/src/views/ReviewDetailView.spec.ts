@@ -88,6 +88,8 @@ interface DetailOverrides {
   canClose?: boolean;
   /** 能否标记为已合并 */
   canMarkMerged?: boolean;
+  /** 是否仓库合并人 */
+  isMerger?: boolean;
   /** 审核人列表 */
   reviewers?: ReviewReviewer[];
 }
@@ -103,6 +105,7 @@ function buildPermissions(overrides: DetailOverrides): ReviewPermissions {
     canManageReviewers: overrides.canManageReviewers ?? false,
     canClose: overrides.canClose ?? false,
     canMarkMerged: overrides.canMarkMerged ?? false,
+    isMerger: overrides.isMerger ?? false,
   };
 }
 

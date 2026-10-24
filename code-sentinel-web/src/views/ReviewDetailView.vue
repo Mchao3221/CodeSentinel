@@ -367,6 +367,9 @@ onMounted(() => {
           :review-id="detail.id"
           :revision-id="selectedRevisionId"
           :is-historical="isHistorical"
+          :current-user-id="authStore.user?.id ?? ''"
+          :is-admin="authStore.isAdmin"
+          :is-merger="detail.permissions.isMerger"
         />
       </div>
     </template>

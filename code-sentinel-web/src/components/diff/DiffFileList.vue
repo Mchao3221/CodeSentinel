@@ -10,14 +10,27 @@ import type { DiffFileListItem, ReviewComment } from '../../api/types';
 import { apiErrorMessage } from '../../utils/apiError';
 import DiffFile from './DiffFile.vue';
 
-const props = defineProps<{
-  /** 评审单主键 */
-  reviewId: string;
-  /** 历史版本主键，空串表示当前版本 */
-  revisionId: string;
-  /** 是否查看历史版本 */
-  isHistorical: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    /** 评审单主键 */
+    reviewId: string;
+    /** 历史版本主键，空串表示当前版本 */
+    revisionId: string;
+    /** 是否查看历史版本 */
+    isHistorical: boolean;
+    /** 当前登录用户主键 */
+    currentUserId?: string;
+    /** 当前用户是否管理员 */
+    isAdmin?: boolean;
+    /** 当前用户是否为仓库合并人 */
+    isMerger?: boolean;
+  }>(),
+  {
+    currentUserId: '',
+    isAdmin: false,
+    isMerger: false,
+  },
+);
 
 /** 文件列表 */
 const files = ref<DiffFileListItem[]>([]);
@@ -104,6 +117,22 @@ async function toggleViewed(path: string, next: boolean): Promise<void> {
 /** 已看过进度文案 */
 const progressText = computed(() => `已看过 ${viewedCount.value}/${fileCount.value}`);
 
+/**
+ * 新建评论后插入本地列表，避免整页刷新。
+ * @param comment 新建的评论
+ */
+function onCommentCreated(comment: ReviewComment): void {
+  comments.value = [...comments.value, comment];
+}
+
+/**
+ * 评论被编辑、删除或解决后替换本地列表中的同主键记录。
+ * @param comment 更新后的评论
+ */
+function onCommentUpdated(comment: ReviewComment): void {
+  comments.value = comments.value.map((item) => (item.id === comment.id ? comment : item));
+}
+
 /** 切换版本时重新加载文件与评论 */
 watch(
   () => props.revisionId,
@@ -145,7 +174,12 @@ onMounted(() => {
       :comments="commentsFor(item)"
       :is-historical="isHistorical"
       :viewed-pending="pendingPaths.has(item.path)"
+      :current-user-id="currentUserId"
+      :is-admin="isAdmin"
+      :is-merger="isMerger"
       @toggle-viewed="toggleViewed"
+      @created="onCommentCreated"
+      @updated="onCommentUpdated"
     />
   </section>
 </template>

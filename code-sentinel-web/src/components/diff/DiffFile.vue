@@ -12,27 +12,45 @@ import type {
   ReviewComment,
 } from '../../api/types';
 import { useHighlight, type LineTokens } from '../../composables/useHighlight';
+import CommentThread from './CommentThread.vue';
 import DiffHunk from './DiffHunk.vue';
 import ViewedCheckbox from './ViewedCheckbox.vue';
 
-const props = defineProps<{
-  /** 评审单主键 */
-  reviewId: string;
-  /** 历史版本主键，空串表示当前版本 */
-  revisionId: string;
-  /** 文件摘要 */
-  file: DiffFileListItem;
-  /** 该文件上的评论（含已过期与已删除） */
-  comments: ReviewComment[];
-  /** 是否查看历史版本，历史版本只读 */
-  isHistorical: boolean;
-  /** 已看过标记是否正在提交 */
-  viewedPending: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    /** 评审单主键 */
+    reviewId: string;
+    /** 历史版本主键，空串表示当前版本 */
+    revisionId: string;
+    /** 文件摘要 */
+    file: DiffFileListItem;
+    /** 该文件上的评论（含已过期与已删除） */
+    comments: ReviewComment[];
+    /** 是否查看历史版本，历史版本只读 */
+    isHistorical: boolean;
+    /** 已看过标记是否正在提交 */
+    viewedPending: boolean;
+    /** 当前登录用户主键 */
+    currentUserId?: string;
+    /** 当前用户是否管理员 */
+    isAdmin?: boolean;
+    /** 当前用户是否为仓库合并人 */
+    isMerger?: boolean;
+  }>(),
+  {
+    currentUserId: '',
+    isAdmin: false,
+    isMerger: false,
+  },
+);
 
 const emit = defineEmits<{
   /** 请求切换已看过状态 */
   'toggle-viewed': [path: string, next: boolean];
+  /** 新建评论成功 */
+  created: [comment: ReviewComment];
+  /** 评论被编辑、删除或解决状态变化 */
+  updated: [comment: ReviewComment];
 }>();
 
 /** 变更状态展示元数据 */
@@ -67,6 +85,14 @@ const statusMeta = computed(() => STATUS_META[props.file.status]);
 const outdatedComments = computed(() =>
   props.comments.filter((comment) => comment.status === 'OUTDATED'),
 );
+
+/** 已过期评论的顶层线程，回复由线程组件按 parentId 递归渲染 */
+const outdatedThreads = computed(() => {
+  const ids = new Set(outdatedComments.value.map((comment) => comment.id));
+  return outdatedComments.value.filter(
+    (comment) => comment.parentId === null || !ids.has(comment.parentId),
+  );
+});
 
 /** 行内评论索引，键为 side:line */
 const commentsByKey = computed(() => {
@@ -147,6 +173,22 @@ async function loadHighlight(): Promise<void> {
 function onToggleViewed(next: boolean): void {
   emit('toggle-viewed', props.file.path, next);
 }
+
+/**
+ * 向上转发评论创建事件。
+ * @param comment 新建的评论
+ */
+function forwardCreated(comment: ReviewComment): void {
+  emit('created', comment);
+}
+
+/**
+ * 向上转发评论更新事件。
+ * @param comment 更新后的评论
+ */
+function forwardUpdated(comment: ReviewComment): void {
+  emit('updated', comment);
+}
 </script>
 
 <template>
@@ -183,11 +225,21 @@ function onToggleViewed(next: boolean): void {
           <span class="diff-outdated-count">{{ outdatedComments.length }}</span>
         </button>
         <ul v-if="showOutdated" class="diff-outdated-list">
-          <li v-for="comment in outdatedComments" :key="comment.id" class="diff-outdated-item">
+          <li v-for="comment in outdatedThreads" :key="comment.id" class="diff-outdated-item">
             <div class="diff-outdated-meta">
-              {{ comment.path }}:{{ comment.line }} · {{ comment.authorDisplayName }}
+              {{ comment.path }}:{{ comment.line }}
             </div>
-            <div class="diff-outdated-body">{{ comment.body }}</div>
+            <CommentThread
+              :review-id="reviewId"
+              :comment="comment"
+              :comments="outdatedComments"
+              :current-user-id="currentUserId"
+              :is-admin="isAdmin"
+              :is-merger="isMerger"
+              :is-historical="isHistorical"
+              @created="forwardCreated"
+              @updated="forwardUpdated"
+            />
           </li>
         </ul>
       </div>
@@ -206,6 +258,14 @@ function onToggleViewed(next: boolean): void {
         :old-tokens="oldTokens"
         :new-tokens="newTokens"
         :comments-by-key="commentsByKey"
+        :review-id="reviewId"
+        :path="file.path"
+        :is-historical="isHistorical"
+        :current-user-id="currentUserId"
+        :is-admin="isAdmin"
+        :is-merger="isMerger"
+        @created="forwardCreated"
+        @updated="forwardUpdated"
       />
     </div>
   </div>
@@ -350,13 +410,6 @@ function onToggleViewed(next: boolean): void {
 .diff-outdated-meta {
   color: var(--el-text-color-secondary);
   font-size: 12px;
-}
-
-.diff-outdated-body {
-  margin-top: 2px;
-  color: var(--el-text-color-regular);
-  font-size: 13px;
-  white-space: pre-wrap;
-  word-break: break-word;
+  margin-bottom: 4px;
 }
 </style>

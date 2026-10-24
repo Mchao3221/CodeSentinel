@@ -189,6 +189,8 @@ export interface ReviewPermissions {
   canClose: boolean;
   /** 能否标记为已合并 */
   canMarkMerged: boolean;
+  /** 是否为该仓库的合并人，管理员不会自动具备 */
+  isMerger: boolean;
 }
 
 /**

@@ -186,6 +186,116 @@ describe('DiffFileList', () => {
     expect(viewedCalls).toEqual([]);
   });
 
+  it('行内新增评论后立即插入本地列表，无需重新加载', async () => {
+    const commentCalls = { count: 0 };
+
+    mockAdapter((config) => {
+      const url = config.url ?? '';
+      const method = (config.method ?? 'get').toLowerCase();
+
+      if (url === '/api/auth/csrf') {
+        return { status: 200, data: { token: 'csrf-test' } };
+      }
+
+      if (url === `/api/reviews/${REVIEW_ID}/files` && method === 'get') {
+        return {
+          status: 200,
+          data: { items: [makeFile('a.txt', false)], total: 1, viewedCount: 0, fileCount: 1, truncated: false },
+        };
+      }
+
+      if (url === `/api/reviews/${REVIEW_ID}/comments` && method === 'get') {
+        commentCalls.count += 1;
+        return { status: 200, data: { items: [] } };
+      }
+
+      if (url === `/api/reviews/${REVIEW_ID}/comments` && method === 'post') {
+        const body = JSON.parse(String(config.data)) as {
+          path: string;
+          side: ReviewComment['side'];
+          line: number;
+          body: string;
+        };
+        return {
+          status: 201,
+          data: {
+            id: 'new-comment-1',
+            revisionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            authorId: '22222222-2222-4222-8222-222222222222',
+            authorDisplayName: '当前用户',
+            path: body.path,
+            side: body.side,
+            line: body.line,
+            body: body.body,
+            parentId: null,
+            status: 'OPEN',
+            resolvedBy: null,
+            resolvedAt: null,
+            createdAt: '2026-10-24T01:00:00Z',
+            updatedAt: '2026-10-24T01:00:00Z',
+          },
+        };
+      }
+
+      if (url === `/api/reviews/${REVIEW_ID}/diff` && method === 'get') {
+        return {
+          status: 200,
+          data: {
+            path: 'a.txt',
+            oldPath: null,
+            status: 'MODIFIED',
+            additions: 1,
+            deletions: 0,
+            isBinary: false,
+            isTooLarge: false,
+            hunks: [
+              {
+                oldStart: 1,
+                oldLines: 0,
+                newStart: 1,
+                newLines: 1,
+                lines: [{ type: 'ADD', oldLine: null, newLine: 1, text: 'added' }],
+              },
+            ],
+          },
+        };
+      }
+
+      if (url === `/api/reviews/${REVIEW_ID}/blob` && method === 'get') {
+        return { status: 200, data: { path: 'a.txt', content: '', isBinary: false, isTooLarge: false } };
+      }
+
+      return { status: 404, data: { code: 'NOT_FOUND', message: url, traceId: 't' } };
+    });
+
+    const wrapper = mount(DiffFileListView, {
+      props: {
+        reviewId: REVIEW_ID,
+        revisionId: '',
+        isHistorical: false,
+        currentUserId: '22222222-2222-4222-8222-222222222222',
+        isAdmin: false,
+        isMerger: false,
+      },
+      global: { plugins: [ElementPlus] },
+    });
+    await flushPromises();
+
+    await wrapper.find('.diff-file-toggle').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.comment-thread').exists()).toBe(false);
+
+    await wrapper.find('.diff-comment-add').trigger('click');
+    await wrapper.find('.comment-composer textarea').setValue('新的行内评论');
+    await wrapper.find('.comment-composer-submit').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.comment-thread').exists()).toBe(true);
+    expect(wrapper.find('.comment-body').text()).toContain('新的行内评论');
+    // 仅在首次加载时请求评论列表，创建后不再整页刷新
+    expect(commentCalls.count).toBe(1);
+  });
+
   it('切换版本后同一路径重新请求并渲染新内容', async () => {
     const diffCalls: { revisionId?: string }[] = [];
 
