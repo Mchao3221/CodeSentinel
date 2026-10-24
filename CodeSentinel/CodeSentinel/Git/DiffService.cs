@@ -175,6 +175,36 @@ public sealed class DiffService
     }
 
     /// <summary>
+    /// 读取某个提交下文件内容的 blob id，用于评论锚点；文件不存在时返回 404 FILE_NOT_IN_DIFF。
+    /// </summary>
+    /// <param name="repoId">仓库主键</param>
+    /// <param name="commitSha">提交 SHA</param>
+    /// <param name="path">文件路径</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>blob id</returns>
+    public async Task<string> GetBlobShaAsync(
+        Guid repoId,
+        string commitSha,
+        string path,
+        CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(commitSha);
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        var mirrorPath = _mirror.GetMirrorPath(repoId);
+        var result = await _git.RunAsync(
+            mirrorPath, ["rev-parse", "--verify", "--quiet", $"{commitSha}:{path}"], null, ct);
+        var sha = result.StdOut.Trim();
+
+        if (result.ExitCode != 0 || sha.Length == 0)
+        {
+            throw FileNotInDiff();
+        }
+
+        return sha;
+    }
+
+    /// <summary>
     /// 校验路径属于该版本 diff 的文件列表，否则返回 404 FILE_NOT_IN_DIFF。
     /// </summary>
     /// <param name="repoId">仓库主键</param>

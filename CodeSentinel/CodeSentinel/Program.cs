@@ -106,6 +106,7 @@ builder.Services.AddScoped<AuditService>();
 builder.Services.AddScoped<NotificationService>();
 builder.Services.AddScoped<ReviewService>();
 builder.Services.AddScoped<ReviewReviewerService>();
+builder.Services.AddScoped<CommentService>();
 builder.Services.AddScoped<AnchorService>();
 builder.Services.AddScoped<RevisionService>();
 builder.Services.AddScoped<CsrfEndpointFilter>();
@@ -161,6 +162,7 @@ api.MapUsersEndpoints();
 api.MapReposEndpoints();
 api.MapBranchEndpoints();
 api.MapReviewsEndpoints();
+api.MapCommentsEndpoints();
 api.MapDiffEndpoints();
 api.MapSyncEndpoints();
 
