@@ -138,6 +138,12 @@ interface MountOptions {
   blobOldBinary?: boolean;
   /** NEW 侧 blob 是否二进制 */
   blobNewBinary?: boolean;
+  /** 当前登录用户主键 */
+  currentUserId?: string;
+  /** 当前用户是否管理员 */
+  isAdmin?: boolean;
+  /** 当前用户是否为仓库合并人 */
+  isMerger?: boolean;
 }
 
 /**
@@ -188,6 +194,9 @@ function mountDiffFile(options: MountOptions = {}): {
       comments: options.comments ?? [],
       isHistorical: options.isHistorical ?? false,
       viewedPending: false,
+      currentUserId: options.currentUserId ?? '',
+      isAdmin: options.isAdmin ?? false,
+      isMerger: options.isMerger ?? false,
     },
     global: { plugins: [ElementPlus] },
   });
@@ -263,6 +272,45 @@ describe('DiffFile', () => {
     await toggle.trigger('click');
     await flushPromises();
     expect(wrapper.find('.comment-body').text()).toBe('过期评论内容');
+  });
+
+  it('已过期评论仅保留删除操作', async () => {
+    const outdated = makeComment({
+      id: 'outdated-1',
+      status: 'OUTDATED',
+      line: 5,
+      body: '过期评论内容',
+    });
+    const { wrapper } = mountDiffFile({
+      comments: [outdated],
+      currentUserId: outdated.authorId,
+    });
+
+    await wrapper.find('.diff-file-toggle').trigger('click');
+    await flushPromises();
+    await wrapper.find('.diff-outdated-toggle').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.comment-action-reply').exists()).toBe(false);
+    expect(wrapper.find('.comment-action-edit').exists()).toBe(false);
+    expect(wrapper.find('.comment-action-resolve').exists()).toBe(false);
+    expect(wrapper.find('.comment-action-delete').exists()).toBe(true);
+  });
+
+  it('行内评论保留回复、编辑、删除与解决操作', async () => {
+    const inline = makeComment({ line: 1, body: '行内评论' });
+    const { wrapper } = mountDiffFile({
+      comments: [inline],
+      currentUserId: inline.authorId,
+    });
+
+    await wrapper.find('.diff-file-toggle').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.comment-action-reply').exists()).toBe(true);
+    expect(wrapper.find('.comment-action-edit').exists()).toBe(true);
+    expect(wrapper.find('.comment-action-delete').exists()).toBe(true);
+    expect(wrapper.find('.comment-action-resolve').exists()).toBe(true);
   });
 
   it('高亮失败或文件过大时回退纯文本', async () => {

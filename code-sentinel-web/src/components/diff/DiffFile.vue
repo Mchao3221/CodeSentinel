@@ -237,6 +237,9 @@ function forwardUpdated(comment: ReviewComment): void {
               :is-admin="isAdmin"
               :is-merger="isMerger"
               :is-historical="isHistorical"
+              :allow-reply="false"
+              :allow-edit="false"
+              :allow-resolve="false"
               @created="forwardCreated"
               @updated="forwardUpdated"
             />

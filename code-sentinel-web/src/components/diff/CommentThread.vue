@@ -24,22 +24,35 @@ const MAX_LENGTH = 5000;
 /** 已删除评论的占位文案 */
 const DELETED_TEXT = '该评论已删除';
 
-const props = defineProps<{
-  /** 评审单主键 */
-  reviewId: string;
-  /** 当前评论 */
-  comment: ReviewComment;
-  /** 同一行上的全部评论，用于按 parentId 组装回复 */
-  comments: ReviewComment[];
-  /** 当前登录用户主键 */
-  currentUserId: string;
-  /** 当前用户是否管理员 */
-  isAdmin: boolean;
-  /** 当前用户是否为仓库合并人 */
-  isMerger: boolean;
-  /** 是否历史版本，历史版本只读 */
-  isHistorical: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    /** 评审单主键 */
+    reviewId: string;
+    /** 当前评论 */
+    comment: ReviewComment;
+    /** 同一行上的全部评论，用于按 parentId 组装回复 */
+    comments: ReviewComment[];
+    /** 当前登录用户主键 */
+    currentUserId: string;
+    /** 当前用户是否管理员 */
+    isAdmin: boolean;
+    /** 当前用户是否为仓库合并人 */
+    isMerger: boolean;
+    /** 是否历史版本，历史版本只读 */
+    isHistorical: boolean;
+    /** 是否允许回复，已过期区域关闭 */
+    allowReply?: boolean;
+    /** 是否允许编辑，已过期区域关闭 */
+    allowEdit?: boolean;
+    /** 是否允许解决，已过期区域关闭 */
+    allowResolve?: boolean;
+  }>(),
+  {
+    allowReply: true,
+    allowEdit: true,
+    allowResolve: true,
+  },
+);
 
 const emit = defineEmits<{
   /** 回复创建成功 */
@@ -73,18 +86,26 @@ const isDeleted = computed(() => local.value.status === 'DELETED');
 const isResolved = computed(() => local.value.status === 'RESOLVED');
 /** 是否本人评论 */
 const isOwn = computed(() => local.value.authorId === props.currentUserId);
-/** 是否可编辑：仅作者且未删除、非历史版本 */
-const canEdit = computed(() => isOwn.value && !isDeleted.value && !props.isHistorical);
+/** 是否可编辑：仅作者、允许编辑、未删除且非历史版本 */
+const canEdit = computed(
+  () => props.allowEdit && isOwn.value && !isDeleted.value && !props.isHistorical,
+);
 /** 是否可删除：作者或管理员，且未删除、非历史版本 */
 const canDelete = computed(
   () => (isOwn.value || props.isAdmin) && !isDeleted.value && !props.isHistorical,
 );
-/** 是否可解决：作者或仓库合并人，且未删除、非历史版本 */
+/** 是否可解决：作者或仓库合并人、允许解决、未删除且非历史版本 */
 const canResolve = computed(
-  () => (isOwn.value || props.isMerger) && !isDeleted.value && !props.isHistorical,
+  () =>
+    props.allowResolve
+    && (isOwn.value || props.isMerger)
+    && !isDeleted.value
+    && !props.isHistorical,
 );
-/** 是否可回复：未删除且非历史版本 */
-const canReply = computed(() => !isDeleted.value && !props.isHistorical);
+/** 是否可回复：允许回复、未删除且非历史版本 */
+const canReply = computed(
+  () => props.allowReply && !isDeleted.value && !props.isHistorical,
+);
 
 /** 当前评论的回复列表，按接口返回顺序展示 */
 const replies = computed(() =>
@@ -373,6 +394,9 @@ function forwardUpdated(comment: ReviewComment): void {
         :is-admin="isAdmin"
         :is-merger="isMerger"
         :is-historical="isHistorical"
+        :allow-reply="allowReply"
+        :allow-edit="allowEdit"
+        :allow-resolve="allowResolve"
         @created="forwardCreated"
         @updated="forwardUpdated"
       />

@@ -99,6 +99,12 @@ interface MountOptions {
   isMerger?: boolean;
   /** 是否历史版本 */
   isHistorical?: boolean;
+  /** 是否允许回复 */
+  allowReply?: boolean;
+  /** 是否允许编辑 */
+  allowEdit?: boolean;
+  /** 是否允许解决 */
+  allowResolve?: boolean;
 }
 
 /**
@@ -140,6 +146,9 @@ function mountThread(
       isAdmin: options.isAdmin ?? false,
       isMerger: options.isMerger ?? false,
       isHistorical: options.isHistorical ?? false,
+      allowReply: options.allowReply ?? true,
+      allowEdit: options.allowEdit ?? true,
+      allowResolve: options.allowResolve ?? true,
     },
     global: { plugins: [ElementPlus] },
   });
@@ -344,6 +353,55 @@ describe('CommentThread', () => {
 
     expect(wrapper.findAll('.comment-action')).toHaveLength(0);
     expect(wrapper.find('.comment-composer').exists()).toBe(false);
+  });
+
+  it('受限模式下过期评论仅保留作者删除操作', () => {
+    const outdated = makeComment({ status: 'OUTDATED' });
+    const { wrapper } = mountThread(() => ({ status: 200, data: outdated }), {
+      comment: outdated,
+      allowReply: false,
+      allowEdit: false,
+      allowResolve: false,
+    });
+
+    expect(wrapper.find('.comment-action-reply').exists()).toBe(false);
+    expect(wrapper.find('.comment-action-edit').exists()).toBe(false);
+    expect(wrapper.find('.comment-action-resolve').exists()).toBe(false);
+    expect(wrapper.find('.comment-action-delete').exists()).toBe(true);
+  });
+
+  it('受限模式下管理员仍可删除过期评论', () => {
+    const outdated = makeComment({ status: 'OUTDATED', authorId: OTHER_USER_ID });
+    const { wrapper } = mountThread(() => ({ status: 200, data: outdated }), {
+      comment: outdated,
+      isAdmin: true,
+      allowReply: false,
+      allowEdit: false,
+      allowResolve: false,
+    });
+
+    expect(wrapper.find('.comment-action-reply').exists()).toBe(false);
+    expect(wrapper.find('.comment-action-edit').exists()).toBe(false);
+    expect(wrapper.find('.comment-action-resolve').exists()).toBe(false);
+    expect(wrapper.find('.comment-action-delete').exists()).toBe(true);
+  });
+
+  it('默认模式下行内 OPEN 与 RESOLVED 评论保留完整操作', () => {
+    const open = makeComment({ status: 'OPEN' });
+    const openThread = mountThread(() => ({ status: 200, data: open }), { comment: open });
+    expect(openThread.wrapper.find('.comment-action-reply').exists()).toBe(true);
+    expect(openThread.wrapper.find('.comment-action-edit').exists()).toBe(true);
+    expect(openThread.wrapper.find('.comment-action-delete').exists()).toBe(true);
+    expect(openThread.wrapper.find('.comment-action-resolve').text()).toBe('解决');
+
+    const resolved = makeComment({ status: 'RESOLVED' });
+    const resolvedThread = mountThread(() => ({ status: 200, data: resolved }), {
+      comment: resolved,
+    });
+    expect(resolvedThread.wrapper.find('.comment-action-reply').exists()).toBe(true);
+    expect(resolvedThread.wrapper.find('.comment-action-edit').exists()).toBe(true);
+    expect(resolvedThread.wrapper.find('.comment-action-delete').exists()).toBe(true);
+    expect(resolvedThread.wrapper.find('.comment-action-resolve').text()).toBe('取消解决');
   });
 
   it('递归渲染 parentId 回复', () => {
