@@ -25,6 +25,10 @@ public sealed class ReviewService(
 
     private const string ReviewTargetType = "REVIEW";
     private const int MaxTitleLength = 200;
+    private const string RemoteTrackingPrefix = "refs/remotes/origin/";
+    private const string HeadRefPrefix = "refs/heads/";
+    private const string ShortRemotePrefix = "origin/";
+    private const string AnyRefPrefix = "refs/";
 
     /// <summary>
     /// 创建评审单：校验仓库成员、分支与审核人，写入评审单、版本 1、审核人、审计，并通知审核人。
@@ -440,19 +444,53 @@ public sealed class ReviewService(
     }
 
     /// <summary>
-    /// 校验并归一化分支名。
+    /// 校验并归一化分支名：远端跟踪引用、origin 前缀与 heads 引用统一成短名，其它引用直接拒绝。
     /// </summary>
     /// <param name="branch">原始分支名</param>
-    /// <returns>去空白后的分支名</returns>
+    /// <returns>短分支名</returns>
     private static string NormalizeBranch(string? branch)
     {
-        var trimmed = branch?.Trim() ?? string.Empty;
-        if (trimmed.Length == 0)
+        var value = branch?.Trim() ?? string.Empty;
+
+        // 逐层剥离已知前缀，避免 refs/remotes/origin/refs/heads/x 这类嵌套写法绕过归一化
+        while (TryStripKnownPrefix(ref value))
         {
-            throw BranchNotFound(string.Empty);
         }
 
-        return trimmed;
+        if (value.Length == 0 || value.StartsWith(AnyRefPrefix, StringComparison.Ordinal))
+        {
+            throw BranchNotFound(value);
+        }
+
+        return value;
+    }
+
+    /// <summary>
+    /// 剥离一层已知的分支引用前缀。
+    /// </summary>
+    /// <param name="value">待归一化的分支名</param>
+    /// <returns>是否发生了剥离</returns>
+    private static bool TryStripKnownPrefix(ref string value)
+    {
+        if (value.StartsWith(RemoteTrackingPrefix, StringComparison.Ordinal))
+        {
+            value = value[RemoteTrackingPrefix.Length..];
+            return true;
+        }
+
+        if (value.StartsWith(HeadRefPrefix, StringComparison.Ordinal))
+        {
+            value = value[HeadRefPrefix.Length..];
+            return true;
+        }
+
+        if (value.StartsWith(ShortRemotePrefix, StringComparison.Ordinal))
+        {
+            value = value[ShortRemotePrefix.Length..];
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>

@@ -255,6 +255,67 @@ public class ReviewCreationTests
     }
 
     /// <summary>
+    /// 各种分支引用写法归一化为短名落库，并与短名共用同一条活跃评审唯一约束；非分支引用直接拒绝。
+    /// </summary>
+    [Fact]
+    public async Task Normalizes_branch_refs_and_enforces_active_review_uniqueness()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedReviewContextAsync(factory, source);
+        var client = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+
+        var fullRef = await CreateReviewAsync(
+            client,
+            context.Repo.Id,
+            "引用写法",
+            null,
+            [context.Reviewer.Id],
+            headBranch: "refs/remotes/origin/feature");
+        Assert.Equal(HttpStatusCode.Created, fullRef.StatusCode);
+        var created = await fullRef.Content.ReadFromJsonAsync<ReviewDetailBody>();
+        Assert.NotNull(created);
+        Assert.Equal("feature", created.HeadBranch);
+        Assert.Equal("main", created.BaseBranch);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var stored = await db.Reviews.AsNoTracking().SingleAsync(m => m.Id == created.Id);
+        Assert.Equal("feature", stored.HeadBranch);
+        Assert.Equal("main", stored.BaseBranch);
+
+        // 短名、origin 前缀与 heads 引用都指向同一分支，必须命中已有活跃评审单
+        foreach (var duplicateBranch in new[] { "feature", "origin/feature", "refs/heads/feature" })
+        {
+            var duplicate = await CreateReviewAsync(
+                client,
+                context.Repo.Id,
+                "重复写法",
+                null,
+                [context.Reviewer.Id],
+                headBranch: duplicateBranch);
+            var body = await duplicate.Content.ReadFromJsonAsync<ActiveReviewExistsBody>();
+
+            Assert.Equal(HttpStatusCode.Conflict, duplicate.StatusCode);
+            Assert.NotNull(body);
+            Assert.Equal("ACTIVE_REVIEW_EXISTS", body.Code);
+            Assert.Equal(created.Id, body.ReviewId);
+        }
+
+        var tagRef = await CreateReviewAsync(
+            client,
+            context.Repo.Id,
+            "标签引用",
+            null,
+            [context.Reviewer.Id],
+            headBranch: "refs/tags/v1.0.0");
+        var error = await tagRef.Content.ReadFromJsonAsync<ErrorBody>();
+        Assert.Equal(HttpStatusCode.BadRequest, tagRef.StatusCode);
+        Assert.NotNull(error);
+        Assert.Equal("BRANCH_NOT_FOUND", error.Code);
+    }
+
+    /// <summary>
     /// 列表 scope 按提交人、审核人与仓库访问权限过滤，且支持状态过滤。
     /// </summary>
     [Fact]
