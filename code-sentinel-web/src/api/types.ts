@@ -336,3 +336,89 @@ export interface ActiveReviewConflict extends ApiErrorBody {
   /** 已存在的活跃评审单主键 */
   reviewId: string;
 }
+
+/**
+ * 审核人提交结论的请求。
+ */
+export interface DecideReviewInput {
+  /** 结论状态，只支持 APPROVED、CHANGES_REQUESTED、PENDING */
+  state: 'APPROVED' | 'CHANGES_REQUESTED' | 'PENDING';
+  /** 结论附言，要求修改时必填 */
+  note?: string;
+}
+
+/**
+ * 关闭评审单的请求。
+ */
+export interface CloseReviewInput {
+  /** 关闭原因，可选 */
+  reason?: string;
+}
+
+/**
+ * 手工标记评审单已合并的请求。
+ */
+export interface MarkMergedInput {
+  /** 合并提交，未提供时后端取目标分支 head */
+  mergeCommitSha?: string;
+}
+
+/**
+ * 评论所在侧。
+ */
+export type CommentSide = 'OLD' | 'NEW';
+
+/**
+ * 评论状态。
+ */
+export type CommentStatus = 'OPEN' | 'RESOLVED' | 'OUTDATED' | 'DELETED';
+
+/**
+ * 行级评论。
+ */
+export interface ReviewComment {
+  /** 评论主键 */
+  id: string;
+  /** 评论创建时所属评审版本 */
+  revisionId: string;
+  /** 作者主键 */
+  authorId: string;
+  /** 作者显示名 */
+  authorDisplayName: string;
+  /** 文件路径 */
+  path: string;
+  /** 行所在侧 */
+  side: CommentSide;
+  /** 该侧文件中的行号 */
+  line: number;
+  /** 评论内容 */
+  body: string;
+  /** 回复的父评论主键，可空 */
+  parentId: string | null;
+  /** 评论状态 */
+  status: CommentStatus;
+  /** 解决人主键 */
+  resolvedBy: string | null;
+  /** 解决时间 */
+  resolvedAt: string | null;
+  /** 创建时间 */
+  createdAt: string;
+  /** 更新时间 */
+  updatedAt: string;
+}
+
+/**
+ * 创建评论或回复的请求。
+ */
+export interface CreateCommentInput {
+  /** 文件路径，重命名后传当前路径 */
+  path: string;
+  /** 行所在侧 */
+  side: CommentSide;
+  /** 该侧文件中的行号 */
+  line: number;
+  /** 评论内容，1 到 5000 个字符 */
+  body: string;
+  /** 回复的父评论主键，可空 */
+  parentId?: string;
+}
