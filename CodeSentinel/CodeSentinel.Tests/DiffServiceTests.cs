@@ -126,6 +126,49 @@ public class DiffServiceTests
         Assert.Equal("文档/新说明.md", blob.Path);
         Assert.Equal(headContent, blob.Content);
         Assert.False(blob.IsBinary);
+
+        // 重命名同时修改一行：单文件 diff 应恢复重命名检测，只呈现真实的 1 增 1 删
+        var diff = await client.GetFromJsonAsync<DiffFileBody>(
+            $"/api/reviews/{review.Id}/diff?path={Uri.EscapeDataString("文档/新说明.md")}");
+        Assert.NotNull(diff);
+        Assert.Equal("RENAMED", diff.Status);
+        Assert.Equal("文档/说明.md", diff.OldPath);
+        Assert.Equal(1, diff.Additions);
+        Assert.Equal(1, diff.Deletions);
+        var hunk = Assert.Single(diff.Hunks);
+        Assert.Equal(1, hunk.OldStart);
+        Assert.Equal(4, hunk.OldLines);
+        Assert.Equal(1, hunk.NewStart);
+        Assert.Equal(4, hunk.NewLines);
+        Assert.Single(hunk.Lines, m => m.Type == "ADD" && m.NewLine == 2);
+        Assert.Single(hunk.Lines, m => m.Type == "DELETE" && m.OldLine == 2);
+    }
+
+    /// <summary>
+    /// 超过 2 MB 的限额按 UTF-8 字节数判断，而不是 UTF-16 字符数。
+    /// </summary>
+    [Fact]
+    public async Task Large_utf8_diff_is_flagged_by_byte_size()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedContextAsync(factory, source);
+        await source.CreateBranchFromMainAsync(HeadBranch);
+
+        // 约 75 万个汉字：UTF-16 码元数约 75 万（< 2MB），UTF-8 字节数约 225 万（> 2MB）
+        var largeChinese = new string('汉', 750_000);
+        await source.CommitChangesAsync(
+            HeadBranch,
+            new Dictionary<string, byte[]> { ["big.txt"] = Text(largeChinese) });
+        await FetchMirrorAsync(factory, context.Repo);
+        var client = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var review = await CreateReviewAsync(client, context.Repo.Id, "字节限额", [context.Reviewer.Id]);
+
+        var diff = await client.GetFromJsonAsync<DiffFileBody>(
+            $"/api/reviews/{review.Id}/diff?path=big.txt");
+        Assert.NotNull(diff);
+        Assert.True(diff.IsTooLarge);
+        Assert.Empty(diff.Hunks);
     }
 
     /// <summary>

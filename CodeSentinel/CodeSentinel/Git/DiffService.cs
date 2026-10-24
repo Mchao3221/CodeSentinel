@@ -62,11 +62,11 @@ public sealed class DiffService
         var range = $"{baseSha}...{headSha}";
         var nameStatus = await _git.RunAsync(
             mirrorPath, ["diff", "--name-status", "-z", "--find-renames=50%", range], null, ct);
-        EnsureSucceeded(nameStatus, "读取 diff 文件列表失败");
+        EnsureSucceeded(nameStatus.ExitCode, nameStatus.StdErr, "读取 diff 文件列表失败");
 
         var numstat = await _git.RunAsync(
             mirrorPath, ["diff", "--numstat", "-z", "--find-renames=50%", range], null, ct);
-        EnsureSucceeded(numstat, "读取 diff 统计失败");
+        EnsureSucceeded(numstat.ExitCode, numstat.StdErr, "读取 diff 统计失败");
 
         var files = MergeFileList(ParseNameStatus(nameStatus.StdOut), ParseNumstat(numstat.StdOut));
         await _cache.WriteIndexAsync(repoId, baseSha, headSha, files, ct);
@@ -98,12 +98,20 @@ public sealed class DiffService
         }
 
         var mirrorPath = _mirror.GetMirrorPath(repoId);
-        var result = await _git.RunAsync(
-            mirrorPath,
-            ["diff", "--no-color", "-U3", "--find-renames=50%", $"{baseSha}...{headSha}", "--", path],
-            null,
-            ct);
-        EnsureSucceeded(result, "读取单文件 diff 失败");
+        var diffArgs = new List<string>
+        {
+            "diff", "--no-color", "-U3", "--find-renames=50%", $"{baseSha}...{headSha}", "--"
+        };
+        if (summary.OldPath is not null)
+        {
+            // 重命名：同时传旧、新两个路径，恢复 git 的重命名检测，避免把新路径当整文件新增
+            diffArgs.Add(summary.OldPath);
+        }
+
+        diffArgs.Add(summary.Path);
+
+        var result = await _git.RunRawAsync(mirrorPath, diffArgs, null, ct);
+        EnsureSucceeded(result.ExitCode, result.StdErr, "读取单文件 diff 失败");
 
         var tooLarge = result.StdOut.Length > MaxDiffSizeBytes;
         if (tooLarge)
@@ -115,7 +123,7 @@ public sealed class DiffService
             return large;
         }
 
-        var parsed = UnifiedDiffParser.Parse(result.StdOut);
+        var parsed = UnifiedDiffParser.Parse(Encoding.UTF8.GetString(result.StdOut));
         var isBinary = summary.IsBinary || parsed.Any(m => m.IsBinary);
         IReadOnlyList<DiffHunk> hunks = isBinary
             ? []
@@ -367,13 +375,14 @@ public sealed class DiffService
     /// <summary>
     /// 校验 git 命令成功，失败时抛出 500 GIT_FAILED。
     /// </summary>
-    /// <param name="result">git 结果</param>
+    /// <param name="exitCode">退出码</param>
+    /// <param name="stdErr">标准错误</param>
     /// <param name="message">错误描述</param>
-    private static void EnsureSucceeded(GitResult result, string message)
+    private static void EnsureSucceeded(int exitCode, string stdErr, string message)
     {
-        if (result.ExitCode != 0)
+        if (exitCode != 0)
         {
-            var detail = result.StdErr.Trim();
+            var detail = stdErr.Trim();
             throw new ApiException(
                 StatusCodes.Status500InternalServerError,
                 "GIT_FAILED",
