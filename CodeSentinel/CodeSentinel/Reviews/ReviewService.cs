@@ -1028,7 +1028,8 @@ public sealed class ReviewService(
             canDecide,
             canManageReviewers,
             review.SubmitterId == userId || isMerger || isAdmin,
-            review.Status == ReviewStatus.Approved && (isMerger || isAdmin));
+            review.Status == ReviewStatus.Approved && (isMerger || isAdmin),
+            isMerger);
     }
 
     /// <summary>

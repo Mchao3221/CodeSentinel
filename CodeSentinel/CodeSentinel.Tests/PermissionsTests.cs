@@ -123,6 +123,39 @@ public class PermissionsTests
     }
 
     /// <summary>
+    /// 评审详情权限里的 isMerger 只取仓库成员上的合并人标记，管理员不会自动成为合并人。
+    /// </summary>
+    [Fact]
+    public async Task Detail_permissions_report_is_merger_only_for_repo_mergers()
+    {
+        using var factory = new TestAppFactory();
+        var submitter = factory.SeedUser(UniqueName("submitter"), TestPassword);
+        var merger = factory.SeedUser(UniqueName("merger"), TestPassword);
+        var member = factory.SeedUser(UniqueName("member"), TestPassword);
+        var repo = factory.SeedRepo("https://example.com/repo-merger.git", UniqueName("repo-merger"));
+        SeedMember(factory, repo.Id, submitter.Id);
+        SeedMember(factory, repo.Id, merger.Id, isMerger: true);
+        SeedMember(factory, repo.Id, member.Id);
+        var reviewId = SeedReview(factory, repo.Id, submitter.Id);
+
+        var mergerClient = await factory.LoginAsync(merger.Username, TestPassword);
+        var mergerDetail = await mergerClient.GetFromJsonAsync<ReviewDetailBody>($"/api/reviews/{reviewId}");
+        Assert.NotNull(mergerDetail);
+        Assert.True(mergerDetail.Permissions.IsMerger);
+
+        var memberClient = await factory.LoginAsync(member.Username, TestPassword);
+        var memberDetail = await memberClient.GetFromJsonAsync<ReviewDetailBody>($"/api/reviews/{reviewId}");
+        Assert.NotNull(memberDetail);
+        Assert.False(memberDetail.Permissions.IsMerger);
+
+        // 管理员可访问任意评审单，但未被标记为合并人时 isMerger 仍为 false
+        var admin = await factory.LoginAsAdminAsync();
+        var adminDetail = await admin.GetFromJsonAsync<ReviewDetailBody>($"/api/reviews/{reviewId}");
+        Assert.NotNull(adminDetail);
+        Assert.False(adminDetail.Permissions.IsMerger);
+    }
+
+    /// <summary>
     /// 仓库 B 作用域端点表：方法、带占位符的路径与可选请求体。
     /// </summary>
     /// <returns>理论数据行</returns>
@@ -199,7 +232,12 @@ public class PermissionsTests
     /// <param name="factory">测试宿主工厂</param>
     /// <param name="repoId">仓库主键</param>
     /// <param name="userId">用户主键</param>
-    private static void SeedMember(TestAppFactory factory, Guid repoId, Guid userId)
+    /// <param name="isMerger">是否为合并人</param>
+    private static void SeedMember(
+        TestAppFactory factory,
+        Guid repoId,
+        Guid userId,
+        bool isMerger = false)
     {
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -208,7 +246,7 @@ public class PermissionsTests
             Id = Guid.NewGuid(),
             RepoId = repoId,
             UserId = userId,
-            IsMerger = false
+            IsMerger = isMerger
         });
         db.SaveChanges();
     }

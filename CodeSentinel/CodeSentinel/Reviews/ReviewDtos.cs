@@ -93,11 +93,13 @@ public sealed record ReviewReviewerDto(
 /// <param name="CanManageReviewers">能否管理审核人</param>
 /// <param name="CanClose">能否关闭评审单</param>
 /// <param name="CanMarkMerged">能否标记为已合并</param>
+/// <param name="IsMerger">当前用户是否为该仓库的合并人</param>
 public sealed record ReviewPermissionsDto(
     bool CanDecide,
     bool CanManageReviewers,
     bool CanClose,
-    bool CanMarkMerged);
+    bool CanMarkMerged,
+    bool IsMerger);
 
 /// <summary>
 /// 评审单详情。

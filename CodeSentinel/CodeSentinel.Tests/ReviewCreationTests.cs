@@ -589,11 +589,13 @@ public sealed record ReviewReviewerBody(Guid UserId, string DisplayName, string 
 /// <param name="CanManageReviewers">能否管理审核人</param>
 /// <param name="CanClose">能否关闭</param>
 /// <param name="CanMarkMerged">能否标记已合并</param>
+/// <param name="IsMerger">当前用户是否为仓库合并人</param>
 public sealed record ReviewPermissionsBody(
     bool CanDecide,
     bool CanManageReviewers,
     bool CanClose,
-    bool CanMarkMerged);
+    bool CanMarkMerged,
+    bool IsMerger);
 
 /// <summary>
 /// 评审列表项 DTO。
