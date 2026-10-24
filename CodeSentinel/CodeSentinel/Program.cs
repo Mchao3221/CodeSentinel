@@ -3,7 +3,9 @@ using CodeSentinel.Auth;
 using CodeSentinel.Common;
 using CodeSentinel.Data;
 using CodeSentinel.Git;
+using CodeSentinel.Notifications;
 using CodeSentinel.Repos;
+using CodeSentinel.Reviews;
 using CodeSentinel.Sync;
 using CodeSentinel.Users;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -99,6 +101,8 @@ builder.Services.AddAuthorization(options =>
 
 builder.Services.AddScoped<PasswordAuthService>();
 builder.Services.AddScoped<AuditService>();
+builder.Services.AddScoped<NotificationService>();
+builder.Services.AddScoped<ReviewService>();
 builder.Services.AddScoped<CsrfEndpointFilter>();
 
 var app = builder.Build();
@@ -151,6 +155,7 @@ api.MapAdminSetupEndpoint();
 api.MapUsersEndpoints();
 api.MapReposEndpoints();
 api.MapBranchEndpoints();
+api.MapReviewsEndpoints();
 api.MapSyncEndpoints();
 
 app.Run();
