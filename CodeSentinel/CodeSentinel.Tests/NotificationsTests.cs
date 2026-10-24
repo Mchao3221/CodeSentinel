@@ -223,6 +223,52 @@ public class NotificationsTests
     }
 
     /// <summary>
+    /// 撤回结论即使未改变聚合状态也要通知提交人：A 通过 + B 待审时 A 撤回，状态仍 OPEN 但收到一条 DECISION_WITHDRAWN。
+    /// </summary>
+    [Fact]
+    public async Task Withdrawal_without_status_change_still_notifies_submitter()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedReviewContextAsync(factory, source);
+        var submitter = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var reviewerA = await factory.LoginAsync(context.ReviewerA.Username, TestPassword);
+        var review = await CreateReviewAsync(
+            submitter, context.Repo.Id, [context.ReviewerA.Id, context.ReviewerB.Id]);
+
+        // A 通过，B 仍待审，评审单保持 OPEN
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await DecideAsync(reviewerA, review.Id, "APPROVED", null)).StatusCode);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var stored = await db.Reviews.AsNoTracking().SingleAsync(m => m.Id == review.Id);
+            Assert.Equal(ReviewStatus.Open, stored.Status);
+        }
+
+        // A 撤回，聚合状态仍 OPEN，但提交人收到一条 DECISION_WITHDRAWN
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await DecideAsync(reviewerA, review.Id, "PENDING", null)).StatusCode);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var stored = await db.Reviews.AsNoTracking().SingleAsync(m => m.Id == review.Id);
+            Assert.Equal(ReviewStatus.Open, stored.Status);
+
+            var withdrawn = await db.Notifications.AsNoTracking()
+                .Where(m => m.ReviewId == review.Id
+                    && m.UserId == context.Submitter.Id
+                    && m.Type == NotificationType.DecisionWithdrawn)
+                .ToListAsync();
+            Assert.Single(withdrawn);
+        }
+    }
+
+    /// <summary>
     /// 新增审核人时，新加入的人收到 REVIEW_SUBMITTED 通知。
     /// </summary>
     [Fact]

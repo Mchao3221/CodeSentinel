@@ -186,7 +186,7 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>
     }
 
     /// <summary>
-    /// 释放宿主并删除临时数据库文件与存储目录。
+    /// 释放宿主并删除临时数据库文件（含 WAL 的 -wal/-shm）与存储目录。
     /// </summary>
     /// <param name="disposing">是否正在释放托管资源</param>
     protected override void Dispose(bool disposing)
@@ -199,6 +199,8 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>
         }
 
         DeleteFileIfExists(_databasePath);
+        DeleteFileIfExists($"{_databasePath}-wal");
+        DeleteFileIfExists($"{_databasePath}-shm");
         TestPaths.DeleteDirectory(_storagePath);
     }
 

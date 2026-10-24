@@ -1,10 +1,10 @@
 using System.Security.Cryptography;
-using System.Text.Json;
 using CodeSentinel.Audit;
 using CodeSentinel.Auth;
 using CodeSentinel.Common;
 using CodeSentinel.Data;
 using CodeSentinel.Data.Entities;
+using CodeSentinel.Reviews;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
@@ -39,8 +39,6 @@ public static class UsersEndpoints
     // 去掉易混淆的 0/O/1/I/l/o，便于管理员转述一次性密码
     private const string ResetPasswordAlphabet =
         "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
-
-    private static readonly JsonSerializerOptions notificationJsonOptions = new(JsonSerializerDefaults.Web);
 
     /// <summary>
     /// 映射用户管理端点，全部要求管理员身份。
@@ -150,6 +148,7 @@ public static class UsersEndpoints
         Guid id,
         PatchUserRequest request,
         AppDbContext db,
+        ReviewService reviewService,
         AuditService auditService,
         HttpContext httpContext,
         CancellationToken ct)
@@ -199,7 +198,8 @@ public static class UsersEndpoints
 
         if (deactivating)
         {
-            await RemoveReviewerFromActiveReviewsAsync(db, user, ct);
+            await reviewService.RemoveReviewersFromActiveReviewsAsync(
+                [user.Id], null, "USER_DEACTIVATED", ct);
         }
 
         auditService.Add(
@@ -243,66 +243,6 @@ public static class UsersEndpoints
         await db.SaveChangesAsync(ct);
 
         return Results.Ok(new { password = newPassword });
-    }
-
-    /// <summary>
-    /// 停用用户时，把其未结束评审中的审核人状态置为 REMOVED，并通知提交人补人。
-    /// </summary>
-    /// <param name="db">数据库上下文</param>
-    /// <param name="user">被停用的用户</param>
-    /// <param name="ct">取消令牌</param>
-    /// <returns></returns>
-    private static async Task RemoveReviewerFromActiveReviewsAsync(
-        AppDbContext db,
-        User user,
-        CancellationToken ct)
-    {
-        var assignments = await (
-            from reviewer in db.ReviewReviewers
-            join review in db.Reviews on reviewer.ReviewId equals review.Id
-            where reviewer.UserId == user.Id
-                && reviewer.State != ReviewerState.Removed
-                && review.Status != ReviewStatus.Merged
-                && review.Status != ReviewStatus.Closed
-            select new
-            {
-                Reviewer = reviewer,
-                ReviewId = review.Id,
-                review.SubmitterId,
-                review.Title
-            }).ToListAsync(ct);
-
-        if (assignments.Count == 0)
-        {
-            return;
-        }
-
-        foreach (var assignment in assignments)
-        {
-            assignment.Reviewer.State = ReviewerState.Removed;
-        }
-
-        var notifications = assignments
-            .GroupBy(m => new { m.ReviewId, m.SubmitterId, m.Title })
-            .Select(group => new Notification
-            {
-                Id = Guid.NewGuid(),
-                UserId = group.Key.SubmitterId,
-                Type = NotificationType.ReviewerRemoved,
-                ReviewId = group.Key.ReviewId,
-                PayloadJson = JsonSerializer.Serialize(
-                    new
-                    {
-                        reviewId = group.Key.ReviewId,
-                        title = group.Key.Title,
-                        removedUserId = user.Id,
-                        removedDisplayName = user.DisplayName,
-                        reason = "USER_DEACTIVATED"
-                    },
-                    notificationJsonOptions)
-            });
-
-        db.Notifications.AddRange(notifications);
     }
 
     /// <summary>

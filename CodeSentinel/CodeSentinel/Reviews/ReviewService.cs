@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSentinel.Audit;
 using CodeSentinel.Common;
 using CodeSentinel.Data;
@@ -42,6 +43,8 @@ public sealed class ReviewService(
     private const string HeadRefPrefix = "refs/heads/";
     private const string ShortRemotePrefix = "origin/";
     private const string AnyRefPrefix = "refs/";
+
+    private static readonly JsonSerializerOptions notificationJsonOptions = new(JsonSerializerDefaults.Web);
 
     /// <summary>
     /// 创建评审单：校验仓库成员、分支与审核人，写入评审单、版本 1、审核人、审计，并通知审核人。
@@ -221,9 +224,7 @@ public sealed class ReviewService(
 
         if (result.ShouldRecompute)
         {
-            var next = ReviewStateMachine.Recompute(
-                await LoadActiveReviewerStatesAsync(reviewId, ct));
-            await ApplyStatusAsync(reviewId, result.ExpectedStatus, next, ct);
+            await RecomputeStatusAsync(reviewId, result.ExpectedStatus, ct);
         }
 
         // 提交人自己移除审核人时不通知自己，管理员代为移除时才提醒提交人补人
@@ -234,6 +235,122 @@ public sealed class ReviewService(
 
         await notificationService.NotifyReviewerRemovedAsync(
             reviewId, result.SubmitterId, userId, "REMOVED_BY_ADMIN", ct);
+    }
+
+    /// <summary>
+    /// 自动移除用户在未结束评审中的审核人资格：置为 Removed、通知提交人补人，并按 P25 重算状态。
+    /// 停用用户与移出仓库成员两条自动路径共用本方法，保证重算口径一致。
+    /// </summary>
+    /// <param name="userIds">被移除的用户主键集合</param>
+    /// <param name="repoId">限定仓库主键，为空时覆盖全部仓库</param>
+    /// <param name="reason">移除原因，写入通知 payload</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns></returns>
+    public async Task RemoveReviewersFromActiveReviewsAsync(
+        IReadOnlyList<Guid> userIds,
+        Guid? repoId,
+        string reason,
+        CancellationToken ct)
+    {
+        var distinctUserIds = userIds.Distinct().ToList();
+        if (distinctUserIds.Count == 0)
+        {
+            return;
+        }
+
+        var assignments = await (
+            from reviewer in db.ReviewReviewers
+            join review in db.Reviews on reviewer.ReviewId equals review.Id
+            where distinctUserIds.Contains(reviewer.UserId)
+                && reviewer.State != ReviewerState.Removed
+                && review.Status != ReviewStatus.Merged
+                && review.Status != ReviewStatus.Closed
+                && (repoId == null || review.RepoId == repoId.Value)
+            select new
+            {
+                Reviewer = reviewer,
+                ReviewId = review.Id,
+                Status = review.Status,
+                SubmitterId = review.SubmitterId,
+                Title = review.Title
+            }).ToListAsync(ct);
+
+        if (assignments.Count == 0)
+        {
+            return;
+        }
+
+        // P25：只有“已给出结论”的审核人被移除才触发重算，移除待审人不自动通过
+        var reviewsToRecompute = assignments
+            .Where(m => m.Reviewer.State is ReviewerState.Approved or ReviewerState.ChangesRequested)
+            .GroupBy(m => m.ReviewId)
+            .Select(group => new { ReviewId = group.Key, Status = group.First().Status })
+            .ToList();
+
+        var displayNames = await LoadDisplayNamesAsync(distinctUserIds, ct);
+
+        foreach (var assignment in assignments)
+        {
+            assignment.Reviewer.State = ReviewerState.Removed;
+            db.Notifications.Add(new Notification
+            {
+                Id = Guid.NewGuid(),
+                UserId = assignment.SubmitterId,
+                Type = NotificationType.ReviewerRemoved,
+                ReviewId = assignment.ReviewId,
+                PayloadJson = JsonSerializer.Serialize(
+                    new
+                    {
+                        reviewId = assignment.ReviewId,
+                        title = assignment.Title,
+                        removedUserId = assignment.Reviewer.UserId,
+                        removedDisplayName = displayNames.GetValueOrDefault(
+                            assignment.Reviewer.UserId, string.Empty),
+                        reason
+                    },
+                    notificationJsonOptions)
+            });
+        }
+
+        await db.SaveChangesAsync(ct);
+
+        // 逐评审单独立重算，属于域内必要的 per-review 查询（合理例外，非同一数据的 N+1）
+        foreach (var item in reviewsToRecompute)
+        {
+            await RecomputeStatusAsync(item.ReviewId, item.Status, ct);
+        }
+    }
+
+    /// <summary>
+    /// 移除审核人后按剩余在册审核人重算评审单状态，并乐观更新。
+    /// </summary>
+    /// <param name="reviewId">评审单主键</param>
+    /// <param name="expectedStatus">操作前的评审单状态</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns></returns>
+    private async Task RecomputeStatusAsync(
+        Guid reviewId,
+        ReviewStatus expectedStatus,
+        CancellationToken ct)
+    {
+        var next = ReviewStateMachine.Recompute(
+            await LoadActiveReviewerStatesAsync(reviewId, ct));
+        await ApplyStatusAsync(reviewId, expectedStatus, next, ct);
+    }
+
+    /// <summary>
+    /// 批量读取用户显示名。
+    /// </summary>
+    /// <param name="userIds">用户主键集合</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>用户主键到显示名的映射</returns>
+    private async Task<Dictionary<Guid, string>> LoadDisplayNamesAsync(
+        IReadOnlyList<Guid> userIds,
+        CancellationToken ct)
+    {
+        return await db.Users.AsNoTracking()
+            .Where(m => userIds.Contains(m.Id))
+            .ToDictionaryAsync(m => m.Id, m => m.DisplayName, ct);
     }
 
     /// <summary>
@@ -562,7 +679,7 @@ public sealed class ReviewService(
     }
 
     /// <summary>
-    /// 状态迁移由本次请求完成时按结论类型通知：通过通知合并人与提交人，要求修改通知提交人，撤回通知提交人。
+    /// 按结论类型通知：撤回结论无论状态是否变化都通知提交人；通过/要求修改仅在完成状态迁移时通知。
     /// </summary>
     /// <param name="review">评审单</param>
     /// <param name="changed">本次请求是否真正完成状态迁移</param>
@@ -579,6 +696,15 @@ public sealed class ReviewService(
         Guid actorId,
         CancellationToken ct)
     {
+        // 撤回（回到 PENDING）无论聚合状态是否变化都要通知提交人，覆盖“状态不变但结论已撤回”的场景
+        if (state == ReviewerState.Pending)
+        {
+            await notificationService.NotifyDecisionWithdrawnAsync(
+                review.Id, review.SubmitterId, actorId, ct);
+            return;
+        }
+
+        // 通过 / 要求修改只在真正完成状态迁移时通知，避免重复通知
         if (!changed)
         {
             return;
@@ -597,17 +723,7 @@ public sealed class ReviewService(
         {
             await notificationService.NotifyUsersAsync(
                 review.Id, [review.SubmitterId], NotificationType.ChangesRequested, ct);
-            return;
         }
-
-        // 剩余分支是“撤回”：只有撤回让状态回退时才通知提交人
-        if (state != ReviewerState.Pending)
-        {
-            return;
-        }
-
-        await notificationService.NotifyDecisionWithdrawnAsync(
-            review.Id, review.SubmitterId, actorId, ct);
     }
 
     /// <summary>

@@ -36,7 +36,8 @@ if (sessionHours <= 0)
 
 builder.Services.AddOpenApi();
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseSqlite(builder.Configuration.GetConnectionString("Default") ?? DefaultConnectionString));
+    options.UseSqlite(builder.Configuration.GetConnectionString("Default") ?? DefaultConnectionString)
+        .AddInterceptors(new SqliteConnectionInterceptor()));
 
 // Data Protection：密钥持久化到 Storage:Root/keys，保证重启后仍能解密仓库凭据
 ConfigureDataProtection(builder);

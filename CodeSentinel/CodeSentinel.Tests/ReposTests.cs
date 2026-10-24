@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using CodeSentinel.Data;
 using CodeSentinel.Data.Entities;
+using CodeSentinel.Reviews;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -388,6 +389,94 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
     }
 
     /// <summary>
+    /// 把已给出结论的审核人移出仓库成员后，其审核资格被移除且评审单状态按剩余审核人重算。
+    /// </summary>
+    [Fact]
+    public async Task Removing_decided_reviewer_from_members_recomputes_review_status()
+    {
+        var reviewerA = factory.SeedUser(UniqueName("member-decided-a"), TestPassword);
+        var reviewerB = factory.SeedUser(UniqueName("member-decided-b"), TestPassword);
+        var context = SeedRepoWithReview(
+            "decided-members",
+            (reviewerA, ReviewerState.Approved),
+            (reviewerB, ReviewerState.Approved));
+
+        var admin = await factory.LoginAsAdminAsync();
+        var put = await admin.PutJsonWithCsrfAsync(
+            $"/api/repos/{context.Repo.Id}/members",
+            new
+            {
+                members = new[]
+                {
+                    new { userId = context.Merger.Id, isMerger = true },
+                    new { userId = context.Submitter.Id, isMerger = false },
+                    new { userId = reviewerB.Id, isMerger = false }
+                }
+            });
+
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var assignment = await db.ReviewReviewers.AsNoTracking()
+            .SingleAsync(m => m.ReviewId == context.Review.Id && m.UserId == reviewerA.Id);
+        var stored = await db.Reviews.AsNoTracking().SingleAsync(m => m.Id == context.Review.Id);
+
+        Assert.Equal(ReviewerState.Removed, assignment.State);
+        Assert.Equal(ReviewStatus.Approved, stored.Status);
+
+        var notified = await db.Notifications.AsNoTracking()
+            .AnyAsync(m => m.ReviewId == context.Review.Id
+                && m.UserId == context.Submitter.Id
+                && m.Type == NotificationType.ReviewerRemoved);
+        Assert.True(notified);
+    }
+
+    /// <summary>
+    /// 把仍待评审的审核人移出仓库成员后不触发重算，不能借移出成员自动通过。
+    /// </summary>
+    [Fact]
+    public async Task Removing_pending_reviewer_from_members_does_not_auto_approve()
+    {
+        var approver = factory.SeedUser(UniqueName("member-approved"), TestPassword);
+        var pending = factory.SeedUser(UniqueName("member-pending"), TestPassword);
+        var context = SeedRepoWithReview(
+            "pending-members",
+            (approver, ReviewerState.Approved),
+            (pending, ReviewerState.Pending));
+
+        var admin = await factory.LoginAsAdminAsync();
+        var put = await admin.PutJsonWithCsrfAsync(
+            $"/api/repos/{context.Repo.Id}/members",
+            new
+            {
+                members = new[]
+                {
+                    new { userId = context.Merger.Id, isMerger = true },
+                    new { userId = context.Submitter.Id, isMerger = false },
+                    new { userId = approver.Id, isMerger = false }
+                }
+            });
+
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var assignment = await db.ReviewReviewers.AsNoTracking()
+            .SingleAsync(m => m.ReviewId == context.Review.Id && m.UserId == pending.Id);
+        var stored = await db.Reviews.AsNoTracking().SingleAsync(m => m.Id == context.Review.Id);
+
+        Assert.Equal(ReviewerState.Removed, assignment.State);
+        Assert.Equal(ReviewStatus.Open, stored.Status);
+
+        var notified = await db.Notifications.AsNoTracking()
+            .AnyAsync(m => m.ReviewId == context.Review.Id
+                && m.UserId == context.Submitter.Id
+                && m.Type == NotificationType.ReviewerRemoved);
+        Assert.True(notified);
+    }
+
+    /// <summary>
     /// 生成不重复的仓库或用户名称。
     /// </summary>
     /// <param name="prefix">名称前缀</param>
@@ -395,6 +484,80 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
     private static string UniqueName(string prefix)
     {
         return $"{prefix}-{Guid.NewGuid():N}";
+    }
+
+    /// <summary>
+    /// 直接写入仓库、成员、评审单与两名审核人，用于验证成员移除对审核人名单的联动。
+    /// </summary>
+    /// <param name="prefix">名称前缀</param>
+    /// <param name="reviewerA">第一审核人及其结论</param>
+    /// <param name="reviewerB">第二审核人及其结论</param>
+    /// <returns>成员移除测试上下文</returns>
+    private MemberRemovalContext SeedRepoWithReview(
+        string prefix,
+        (User Reviewer, ReviewerState State) reviewerA,
+        (User Reviewer, ReviewerState State) reviewerB)
+    {
+        var submitter = factory.SeedUser(UniqueName($"{prefix}-submitter"), TestPassword);
+        var merger = factory.SeedUser(UniqueName($"{prefix}-merger"), TestPassword);
+        var repo = factory.SeedRepo("https://example.com/repo.git", UniqueName(prefix));
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        AddMember(db, repo.Id, submitter.Id, isMerger: false);
+        AddMember(db, repo.Id, merger.Id, isMerger: true);
+        AddMember(db, repo.Id, reviewerA.Reviewer.Id, isMerger: false);
+        AddMember(db, repo.Id, reviewerB.Reviewer.Id, isMerger: false);
+
+        var review = new Review
+        {
+            Id = Guid.NewGuid(),
+            RepoId = repo.Id,
+            BaseBranch = "main",
+            HeadBranch = $"feature/{Guid.NewGuid():N}",
+            SubmitterId = submitter.Id,
+            Title = "成员移除验证",
+            Status = ReviewStateMachine.Recompute(new[] { reviewerA.State, reviewerB.State }),
+            BaseSha = "base-sha",
+            HeadSha = "head-sha"
+        };
+        db.Reviews.Add(review);
+        db.ReviewReviewers.Add(new ReviewReviewer
+        {
+            Id = Guid.NewGuid(),
+            ReviewId = review.Id,
+            UserId = reviewerA.Reviewer.Id,
+            State = reviewerA.State
+        });
+        db.ReviewReviewers.Add(new ReviewReviewer
+        {
+            Id = Guid.NewGuid(),
+            ReviewId = review.Id,
+            UserId = reviewerB.Reviewer.Id,
+            State = reviewerB.State
+        });
+        db.SaveChanges();
+
+        return new MemberRemovalContext(
+            repo, submitter, merger, reviewerA.Reviewer, reviewerB.Reviewer, review);
+    }
+
+    /// <summary>
+    /// 直接写入一条仓库成员关系。
+    /// </summary>
+    /// <param name="db">数据库上下文</param>
+    /// <param name="repoId">仓库主键</param>
+    /// <param name="userId">用户主键</param>
+    /// <param name="isMerger">是否合并人</param>
+    private static void AddMember(AppDbContext db, Guid repoId, Guid userId, bool isMerger)
+    {
+        db.RepoMembers.Add(new RepoMember
+        {
+            Id = Guid.NewGuid(),
+            RepoId = repoId,
+            UserId = userId,
+            IsMerger = isMerger
+        });
     }
 
     /// <summary>
@@ -429,6 +592,23 @@ public class ReposTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
         Assert.NotNull(body);
         return body;
     }
+
+    /// <summary>
+    /// 成员移除联动测试上下文。
+    /// </summary>
+    /// <param name="Repo">仓库</param>
+    /// <param name="Submitter">提交人</param>
+    /// <param name="Merger">合并人</param>
+    /// <param name="ReviewerA">第一审核人</param>
+    /// <param name="ReviewerB">第二审核人</param>
+    /// <param name="Review">评审单</param>
+    private sealed record MemberRemovalContext(
+        Repo Repo,
+        User Submitter,
+        User Merger,
+        User ReviewerA,
+        User ReviewerB,
+        Review Review);
 }
 
 /// <summary>

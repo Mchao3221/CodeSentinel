@@ -4,6 +4,7 @@ using CodeSentinel.Common;
 using CodeSentinel.Data;
 using CodeSentinel.Data.Entities;
 using CodeSentinel.Git;
+using CodeSentinel.Reviews;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
@@ -294,6 +295,7 @@ public static class ReposEndpoints
         Guid id,
         ReplaceMembersRequest request,
         AppDbContext db,
+        ReviewService reviewService,
         AuditService auditService,
         HttpContext httpContext,
         CancellationToken ct)
@@ -310,6 +312,11 @@ public static class ReposEndpoints
         await EnsureMembersExistAsync(db, desired.Select(m => m.UserId).ToList(), ct);
         var existing = await db.RepoMembers.Where(m => m.RepoId == id).ToListAsync(ct);
         var diff = ApplyMemberDiff(db, id, existing, desired);
+
+        // spec §19.14：被移出仓库的用户自动从该仓库未结束评审的审核人名单移除，并通知提交人补人
+        await reviewService.RemoveReviewersFromActiveReviewsAsync(
+            diff.Removed, id, "REMOVED_FROM_REPO", ct);
+
         await db.SaveChangesAsync(ct);
 
         await auditService.RecordAsync(

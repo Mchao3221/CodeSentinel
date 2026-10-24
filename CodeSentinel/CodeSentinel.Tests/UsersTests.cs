@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using CodeSentinel.Data;
 using CodeSentinel.Data.Entities;
+using CodeSentinel.Reviews;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -84,7 +85,7 @@ public class UsersTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
     {
         var reviewer = factory.SeedUser("reviewer-to-remove", "Passw0rd!");
         var submitter = factory.SeedUser("submitter-one", "Passw0rd!");
-        var reviewId = SeedActiveReview(submitter.Id, reviewer.Id);
+        var review = SeedReview(submitter, (reviewer, ReviewerState.Pending));
 
         var admin = await factory.LoginAsAdminAsync();
         var patch = await admin.PatchJsonWithCsrfAsync(
@@ -96,12 +97,120 @@ public class UsersTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var assignment = await db.ReviewReviewers.SingleAsync(
-            m => m.ReviewId == reviewId && m.UserId == reviewer.Id);
+            m => m.ReviewId == review.Id && m.UserId == reviewer.Id);
         var notification = await db.Notifications.SingleAsync(
-            m => m.ReviewId == reviewId && m.UserId == submitter.Id);
+            m => m.ReviewId == review.Id && m.UserId == submitter.Id);
 
         Assert.Equal(ReviewerState.Removed, assignment.State);
         Assert.Equal(NotificationType.ReviewerRemoved, notification.Type);
+    }
+
+    /// <summary>
+    /// 停用唯一一名“要求修改”的审核人后，评审单回到 OPEN。
+    /// </summary>
+    [Fact]
+    public async Task Deactivating_only_changes_requested_reviewer_returns_review_to_open()
+    {
+        var submitter = factory.SeedUser("submitter-cr", "Passw0rd!");
+        var reviewer = factory.SeedUser("reviewer-cr", "Passw0rd!");
+        var review = SeedReview(submitter, (reviewer, ReviewerState.ChangesRequested));
+
+        var admin = await factory.LoginAsAdminAsync();
+        var patch = await admin.PatchJsonWithCsrfAsync(
+            $"/api/users/{reviewer.Id}",
+            new { isActive = false });
+
+        Assert.Equal(HttpStatusCode.OK, patch.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var stored = await db.Reviews.AsNoTracking().SingleAsync(m => m.Id == review.Id);
+        Assert.Equal(ReviewStatus.Open, stored.Status);
+    }
+
+    /// <summary>
+    /// 停用“要求修改”的审核人且仍有审核人已通过时，评审单重算为 APPROVED。
+    /// </summary>
+    [Fact]
+    public async Task Deactivating_changes_requested_reviewer_recomputes_to_approved()
+    {
+        var submitter = factory.SeedUser("submitter-cr2", "Passw0rd!");
+        var changes = factory.SeedUser("reviewer-cr2", "Passw0rd!");
+        var approver = factory.SeedUser("reviewer-ok2", "Passw0rd!");
+        var review = SeedReview(
+            submitter,
+            (changes, ReviewerState.ChangesRequested),
+            (approver, ReviewerState.Approved));
+
+        var admin = await factory.LoginAsAdminAsync();
+        var patch = await admin.PatchJsonWithCsrfAsync(
+            $"/api/users/{changes.Id}",
+            new { isActive = false });
+
+        Assert.Equal(HttpStatusCode.OK, patch.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var stored = await db.Reviews.AsNoTracking().SingleAsync(m => m.Id == review.Id);
+        Assert.Equal(ReviewStatus.Approved, stored.Status);
+    }
+
+    /// <summary>
+    /// 停用两名已通过审核人中的一名时，评审单仍为 APPROVED。
+    /// </summary>
+    [Fact]
+    public async Task Deactivating_one_approved_reviewer_keeps_review_approved()
+    {
+        var submitter = factory.SeedUser("submitter-ok", "Passw0rd!");
+        var first = factory.SeedUser("reviewer-ok-a", "Passw0rd!");
+        var second = factory.SeedUser("reviewer-ok-b", "Passw0rd!");
+        var review = SeedReview(
+            submitter,
+            (first, ReviewerState.Approved),
+            (second, ReviewerState.Approved));
+
+        var admin = await factory.LoginAsAdminAsync();
+        var patch = await admin.PatchJsonWithCsrfAsync(
+            $"/api/users/{first.Id}",
+            new { isActive = false });
+
+        Assert.Equal(HttpStatusCode.OK, patch.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var stored = await db.Reviews.AsNoTracking().SingleAsync(m => m.Id == review.Id);
+        var removed = await db.ReviewReviewers.AsNoTracking()
+            .SingleAsync(m => m.ReviewId == review.Id && m.UserId == first.Id);
+
+        Assert.Equal(ReviewStatus.Approved, stored.Status);
+        Assert.Equal(ReviewerState.Removed, removed.State);
+    }
+
+    /// <summary>
+    /// 停用仍待评审的审核人不触发重算，不能借移除待审人自动通过。
+    /// </summary>
+    [Fact]
+    public async Task Deactivating_pending_reviewer_does_not_auto_approve()
+    {
+        var submitter = factory.SeedUser("submitter-pending", "Passw0rd!");
+        var approver = factory.SeedUser("reviewer-approved", "Passw0rd!");
+        var pending = factory.SeedUser("reviewer-pending", "Passw0rd!");
+        var review = SeedReview(
+            submitter,
+            (approver, ReviewerState.Approved),
+            (pending, ReviewerState.Pending));
+
+        var admin = await factory.LoginAsAdminAsync();
+        var patch = await admin.PatchJsonWithCsrfAsync(
+            $"/api/users/{pending.Id}",
+            new { isActive = false });
+
+        Assert.Equal(HttpStatusCode.OK, patch.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var stored = await db.Reviews.AsNoTracking().SingleAsync(m => m.Id == review.Id);
+        Assert.Equal(ReviewStatus.Open, stored.Status);
     }
 
     /// <summary>
@@ -148,12 +257,12 @@ public class UsersTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
     }
 
     /// <summary>
-    /// 准备一个进行中的评审单，并挂上一名 PENDING 状态的审核人。
+    /// 准备一个进行中的评审单，挂上指定结论状态的审核人，并按状态机对齐评审单状态。
     /// </summary>
-    /// <param name="submitterId">提交人主键</param>
-    /// <param name="reviewerId">审核人主键</param>
-    /// <returns>评审单主键</returns>
-    private Guid SeedActiveReview(Guid submitterId, Guid reviewerId)
+    /// <param name="submitter">提交人</param>
+    /// <param name="reviewers">审核人及其结论状态</param>
+    /// <returns>创建的评审单</returns>
+    private Review SeedReview(User submitter, params (User Reviewer, ReviewerState State)[] reviewers)
     {
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -171,26 +280,28 @@ public class UsersTests(TestAppFactory factory) : IClassFixture<TestAppFactory>
             Id = Guid.NewGuid(),
             RepoId = repo.Id,
             BaseBranch = "main",
-            HeadBranch = "feature/deactivate",
-            SubmitterId = submitterId,
+            HeadBranch = $"feature/{Guid.NewGuid():N}",
+            SubmitterId = submitter.Id,
             Title = "停用审核人验证",
-            Status = ReviewStatus.Open,
+            Status = ReviewStateMachine.Recompute(reviewers.Select(m => m.State)),
             BaseSha = "base-sha",
             HeadSha = "head-sha"
-        };
-        var assignment = new ReviewReviewer
-        {
-            Id = Guid.NewGuid(),
-            ReviewId = review.Id,
-            UserId = reviewerId,
-            State = ReviewerState.Pending
         };
 
         db.Repos.Add(repo);
         db.Reviews.Add(review);
-        db.ReviewReviewers.Add(assignment);
-        db.SaveChanges();
+        foreach (var (reviewer, state) in reviewers)
+        {
+            db.ReviewReviewers.Add(new ReviewReviewer
+            {
+                Id = Guid.NewGuid(),
+                ReviewId = review.Id,
+                UserId = reviewer.Id,
+                State = state
+            });
+        }
 
-        return review.Id;
+        db.SaveChanges();
+        return review;
     }
 }
