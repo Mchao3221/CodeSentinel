@@ -37,6 +37,15 @@ const lineTokens = computed(() => props.tokens ?? []);
 const hasTokens = computed(() => lineTokens.value.length > 0);
 
 /**
+ * 把 token 语义类别映射为固定 class。
+ * @param token 高亮 token
+ * @returns 语义 class
+ */
+function tokenClass(token: HighlightToken): string {
+  return `diff-token-${token.className}`;
+}
+
+/**
  * 评论展示样式类，已解决与已删除单独区分。
  * @param comment 评论
  * @returns 样式类
@@ -67,7 +76,7 @@ function commentBody(comment: ReviewComment): string {
             v-for="(token, tokenIndex) in lineTokens"
             :key="tokenIndex"
             class="diff-token"
-            :style="token.color ? { color: token.color } : undefined"
+            :class="tokenClass(token)"
           >{{ token.content }}</span>
         </template>
         <template v-else>{{ line.text }}</template>
@@ -131,6 +140,59 @@ function commentBody(comment: ReviewComment): string {
 
 .diff-token {
   white-space: pre;
+}
+
+/* github-light 对齐的语义配色，未映射的 token 使用默认前景色 */
+.diff-token-comment {
+  color: #6a737d;
+}
+
+.diff-token-string {
+  color: #032f62;
+}
+
+.diff-token-keyword {
+  color: #d73a49;
+}
+
+.diff-token-number {
+  color: #005cc5;
+}
+
+.diff-token-function {
+  color: #6f42c1;
+}
+
+.diff-token-type {
+  color: #6f42c1;
+}
+
+.diff-token-variable {
+  color: #e36209;
+}
+
+.diff-token-tag {
+  color: #22863a;
+}
+
+.diff-token-attribute {
+  color: #6f42c1;
+}
+
+.diff-token-property {
+  color: #005cc5;
+}
+
+.diff-token-operator {
+  color: #d73a49;
+}
+
+.diff-token-punctuation {
+  color: #24292e;
+}
+
+.diff-token-default {
+  color: #24292e;
 }
 
 .diff-comment-row {

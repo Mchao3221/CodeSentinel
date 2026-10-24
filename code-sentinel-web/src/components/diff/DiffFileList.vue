@@ -137,7 +137,7 @@ onMounted(() => {
 
     <DiffFile
       v-for="item in files"
-      :key="item.path"
+      :key="`${revisionId}:${item.path}`"
       class="diff-file-item"
       :review-id="reviewId"
       :revision-id="revisionId"

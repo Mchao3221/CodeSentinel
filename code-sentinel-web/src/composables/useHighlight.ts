@@ -1,6 +1,7 @@
 /**
  * 语法高亮：按版本与文件侧懒加载 Shiki 高亮器，把文件全文分词并按行号取用。
  * 使用 JavaScript 正则引擎避免引入 WASM，并只注册一个小型语言集合。
+ * token 颜色不落内联样式，而是把 grammar scope 映射为语义 class。
  */
 import { createHighlighter, type Highlighter } from 'shiki';
 import { createJavaScriptRegexEngine } from 'shiki/engine/javascript';
@@ -9,13 +10,31 @@ import { getBlob } from '../api/diff';
 import type { DiffSide } from '../api/types';
 
 /**
+ * token 语义类别，对应 DiffLine 中的固定 class。
+ */
+export type TokenClass =
+  | 'comment'
+  | 'string'
+  | 'keyword'
+  | 'number'
+  | 'function'
+  | 'type'
+  | 'variable'
+  | 'tag'
+  | 'attribute'
+  | 'property'
+  | 'operator'
+  | 'punctuation'
+  | 'default';
+
+/**
  * 单个高亮 token。
  */
 export interface HighlightToken {
   /** token 文本 */
   content: string;
-  /** token 颜色，来自主题 */
-  color?: string;
+  /** 语义类别，用于渲染为固定 class */
+  className: TokenClass;
 }
 
 /**
@@ -53,6 +72,14 @@ type HighlightLang = (typeof LANGS)[number];
 /** 模块级高亮器，首次使用时懒加载 */
 let highlighterPromise: Promise<Highlighter> | null = null;
 
+/** Shiki 分词 token 的结构子集，避免直接依赖内部类型 */
+interface RawToken {
+  /** token 文本 */
+  content: string;
+  /** 分词解释，含命中的 grammar scope */
+  explanation?: { scopes: { scopeName: string }[] }[];
+}
+
 /**
  * 懒加载唯一的 Shiki 高亮器，只注册小型语言集合与 github-light 主题。
  * @returns 高亮器 Promise
@@ -67,6 +94,78 @@ function getHighlighter(): Promise<Highlighter> {
   }
 
   return highlighterPromise;
+}
+
+/**
+ * 把 grammar scope 列表映射为语义 class；未命中时返回 default。
+ * @param scopes scope 名列表
+ * @returns 语义类别
+ */
+export function scopeToClass(scopes: string[]): TokenClass {
+  const joined = scopes.join(' ');
+
+  if (joined.includes('comment')) {
+    return 'comment';
+  }
+
+  if (joined.includes('string') || joined.includes('quoted')) {
+    return 'string';
+  }
+
+  if (
+    joined.includes('entity.name.function')
+    || joined.includes('support.function')
+    || joined.includes('function-call')
+  ) {
+    return 'function';
+  }
+
+  if (
+    joined.includes('entity.name.type')
+    || joined.includes('entity.name.class')
+    || joined.includes('storage.type')
+    || joined.includes('support.class')
+  ) {
+    return 'type';
+  }
+
+  if (joined.includes('constant.numeric')) {
+    return 'number';
+  }
+
+  if (joined.includes('keyword.operator')) {
+    return 'operator';
+  }
+
+  if (joined.includes('keyword')) {
+    return 'keyword';
+  }
+
+  if (joined.includes('entity.name.tag')) {
+    return 'tag';
+  }
+
+  if (joined.includes('attribute-name')) {
+    return 'attribute';
+  }
+
+  if (joined.includes('variable.other.property') || joined.includes('property-name')) {
+    return 'property';
+  }
+
+  if (joined.includes('variable')) {
+    return 'variable';
+  }
+
+  if (joined.includes('operator')) {
+    return 'operator';
+  }
+
+  if (joined.includes('punctuation')) {
+    return 'punctuation';
+  }
+
+  return 'default';
 }
 
 /**
@@ -139,11 +238,20 @@ function byteLength(value: string): number {
 }
 
 /**
- * 把 Shiki 的二维 token 结果按行号映射。
+ * 提取 token 命中的全部 grammar scope 名。
+ * @param token 分词 token
+ * @returns scope 名列表
+ */
+function tokenScopes(token: RawToken): string[] {
+  return (token.explanation ?? []).flatMap((item) => item.scopes.map((scope) => scope.scopeName));
+}
+
+/**
+ * 把 Shiki 的二维 token 结果按行号映射，并转换为语义 class。
  * @param tokens Shiki 返回的逐行 token
  * @returns 行号到 token 列表的映射
  */
-function toLineTokens(tokens: { content: string; color?: string }[][]): LineTokens {
+function toLineTokens(tokens: RawToken[][]): LineTokens {
   const result: LineTokens = new Map();
   tokens.forEach((lineTokens, index) => {
     if (lineTokens.length === 0) {
@@ -152,7 +260,10 @@ function toLineTokens(tokens: { content: string; color?: string }[][]): LineToke
 
     result.set(
       index + 1,
-      lineTokens.map((token) => ({ content: token.content, color: token.color })),
+      lineTokens.map((token) => ({
+        content: token.content,
+        className: scopeToClass(tokenScopes(token)),
+      })),
     );
   });
 
@@ -233,6 +344,7 @@ export function useHighlight(): {
       const { tokens } = highlighter.codeToTokens(blob.content, {
         lang,
         theme: 'github-light',
+        includeExplanation: true,
       });
       return toLineTokens(tokens);
     } catch {

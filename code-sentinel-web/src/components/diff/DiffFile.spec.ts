@@ -9,7 +9,9 @@ import type {
   DiffFileListItem,
   ReviewComment,
 } from '../../api/types';
+import { scopeToClass, type HighlightToken } from '../../composables/useHighlight';
 import DiffFileView from './DiffFile.vue';
+import DiffLineView from './DiffLine.vue';
 
 /** 评审单主键 */
 const REVIEW_ID = '55555555-5555-4555-8555-555555555555';
@@ -307,5 +309,36 @@ describe('DiffFile', () => {
 
     const checkbox = wrapper.findComponent(ElCheckbox);
     expect(checkbox.props('disabled')).toBe(true);
+  });
+
+  it('scope→class 映射 keyword/string/comment/number', () => {
+    expect(scopeToClass(['source.js', 'keyword.control.js'])).toBe('keyword');
+    expect(scopeToClass(['source.js', 'string.quoted.double.js'])).toBe('string');
+    expect(scopeToClass(['source.js', 'comment.line.double-slash.js'])).toBe('comment');
+    expect(scopeToClass(['source.js', 'constant.numeric.js'])).toBe('number');
+  });
+
+  it('token 渲染不含内联 style 且带语义 class', () => {
+    const tokens: HighlightToken[] = [
+      { content: 'const', className: 'keyword' },
+      { content: ' ', className: 'default' },
+      { content: '"hi"', className: 'string' },
+    ];
+
+    const wrapper = mount(DiffLineView, {
+      props: {
+        line: { type: 'ADD', oldLine: null, newLine: 1, text: 'const "hi"' },
+        tokens,
+        comments: [],
+      },
+      global: { plugins: [ElementPlus] },
+    });
+
+    const spans = wrapper.findAll('.diff-token');
+    expect(spans).toHaveLength(3);
+    expect(spans.every((span) => !span.element.hasAttribute('style'))).toBe(true);
+    expect(spans[0].classes()).toContain('diff-token-keyword');
+    expect(spans[2].classes()).toContain('diff-token-string');
+    wrapper.unmount();
   });
 });

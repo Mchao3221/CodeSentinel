@@ -185,4 +185,82 @@ describe('DiffFileList', () => {
 
     expect(viewedCalls).toEqual([]);
   });
+
+  it('切换版本后同一路径重新请求并渲染新内容', async () => {
+    const diffCalls: { revisionId?: string }[] = [];
+
+    mockAdapter((config) => {
+      const url = config.url ?? '';
+      const method = (config.method ?? 'get').toLowerCase();
+      const params = (config.params ?? {}) as { path?: string; revisionId?: string };
+
+      if (url === '/api/auth/csrf') {
+        return { status: 200, data: { token: 'csrf-test' } };
+      }
+
+      if (url === `/api/reviews/${REVIEW_ID}/files` && method === 'get') {
+        return {
+          status: 200,
+          data: { items: [makeFile('a.txt', false)], total: 1, viewedCount: 0, fileCount: 1, truncated: false },
+        };
+      }
+
+      if (url === `/api/reviews/${REVIEW_ID}/comments` && method === 'get') {
+        return { status: 200, data: { items: [] } };
+      }
+
+      if (url === `/api/reviews/${REVIEW_ID}/diff` && method === 'get') {
+        diffCalls.push({ revisionId: params.revisionId });
+        const text = params.revisionId === 'rev-b' ? 'content b' : 'content a';
+        return {
+          status: 200,
+          data: {
+            path: 'a.txt',
+            oldPath: null,
+            status: 'MODIFIED',
+            additions: 1,
+            deletions: 0,
+            isBinary: false,
+            isTooLarge: false,
+            hunks: [
+              {
+                oldStart: 1,
+                oldLines: 1,
+                newStart: 1,
+                newLines: 1,
+                lines: [{ type: 'ADD', oldLine: null, newLine: 1, text }],
+              },
+            ],
+          },
+        };
+      }
+
+      if (url === `/api/reviews/${REVIEW_ID}/blob` && method === 'get') {
+        return { status: 200, data: { path: 'a.txt', content: '', isBinary: false, isTooLarge: false } };
+      }
+
+      return { status: 404, data: { code: 'NOT_FOUND', message: url, traceId: 't' } };
+    });
+
+    const wrapper = mount(DiffFileListView, {
+      props: { reviewId: REVIEW_ID, revisionId: 'rev-a', isHistorical: false },
+      global: { plugins: [ElementPlus] },
+    });
+    await flushPromises();
+
+    // 版本 A 展开渲染内容 A
+    await wrapper.find('.diff-file-toggle').trigger('click');
+    await flushPromises();
+    expect(wrapper.text()).toContain('content a');
+
+    // 切换到版本 B 后同一路径重新挂载，展开渲染内容 B
+    await wrapper.setProps({ revisionId: 'rev-b' });
+    await flushPromises();
+    await wrapper.find('.diff-file-toggle').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('content b');
+    expect(wrapper.text()).not.toContain('content a');
+    expect(diffCalls.some((call) => call.revisionId === 'rev-b')).toBe(true);
+  });
 });
