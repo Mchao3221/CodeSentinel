@@ -5,7 +5,7 @@ namespace CodeSentinel.Data.Entities;
 /// <summary>
 /// 审核结论历史记录，只追加不修改。
 /// </summary>
-public class ReviewDecision
+public class ReviewDecision : IAuditableEntity
 {
     /// <summary>
     /// 主键。

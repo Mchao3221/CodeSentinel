@@ -5,7 +5,7 @@ namespace CodeSentinel.Data.Entities;
 /// <summary>
 /// 评审版本，分支 B 每有新提交追加一条。
 /// </summary>
-public class ReviewRevision
+public class ReviewRevision : IAuditableEntity
 {
     /// <summary>
     /// 主键。

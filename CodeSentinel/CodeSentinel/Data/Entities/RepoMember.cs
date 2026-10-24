@@ -3,7 +3,7 @@ namespace CodeSentinel.Data.Entities;
 /// <summary>
 /// 仓库成员及其合并人标记。
 /// </summary>
-public class RepoMember
+public class RepoMember : IAuditableEntity
 {
     /// <summary>
     /// 主键。

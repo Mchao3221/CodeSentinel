@@ -5,7 +5,7 @@ namespace CodeSentinel.Data.Entities;
 /// <summary>
 /// 审计日志。
 /// </summary>
-public class AuditLog
+public class AuditLog : IAuditableEntity
 {
     /// <summary>
     /// 主键。

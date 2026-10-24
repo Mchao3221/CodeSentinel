@@ -5,7 +5,7 @@ namespace CodeSentinel.Data.Entities;
 /// <summary>
 /// 系统用户。
 /// </summary>
-public class User
+public class User : IAuditableEntity
 {
     /// <summary>
     /// 主键。

@@ -5,7 +5,7 @@ namespace CodeSentinel.Data.Entities;
 /// <summary>
 /// 行级评论。
 /// </summary>
-public class Comment
+public class Comment : IAuditableEntity
 {
     /// <summary>
     /// 主键。

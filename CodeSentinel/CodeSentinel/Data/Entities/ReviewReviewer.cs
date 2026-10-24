@@ -5,7 +5,7 @@ namespace CodeSentinel.Data.Entities;
 /// <summary>
 /// 评审单上的审核人及其当前结论。
 /// </summary>
-public class ReviewReviewer
+public class ReviewReviewer : IAuditableEntity
 {
     /// <summary>
     /// 主键。

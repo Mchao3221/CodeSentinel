@@ -5,7 +5,7 @@ namespace CodeSentinel.Data.Entities;
 /// <summary>
 /// 受管 git 仓库。
 /// </summary>
-public class Repo
+public class Repo : IAuditableEntity
 {
     /// <summary>
     /// 主键。

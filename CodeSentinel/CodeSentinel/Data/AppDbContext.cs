@@ -1,5 +1,6 @@
 using CodeSentinel.Data.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace CodeSentinel.Data;
 
@@ -64,6 +65,52 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
 
     /// <summary>
+    /// 保存更改，并自动维护创建/更新时间。
+    /// </summary>
+    /// <param name="acceptAllChangesOnSuccess">保存成功后是否接受所有更改</param>
+    /// <returns>受影响的行数</returns>
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        ApplyAuditTimestamps();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    /// <summary>
+    /// 异步保存更改，并自动维护创建/更新时间。
+    /// </summary>
+    /// <param name="acceptAllChangesOnSuccess">保存成功后是否接受所有更改</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>受影响的行数</returns>
+    public override Task<int> SaveChangesAsync(
+        bool acceptAllChangesOnSuccess,
+        CancellationToken cancellationToken = default)
+    {
+        ApplyAuditTimestamps();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
+    /// <summary>
+    /// 按实体状态写入 UTC 创建/更新时间。
+    /// </summary>
+    private void ApplyAuditTimestamps()
+    {
+        var now = DateTime.UtcNow;
+
+        foreach (var entry in ChangeTracker.Entries<IAuditableEntity>())
+        {
+            if (entry.State == EntityState.Added)
+            {
+                entry.Entity.CreatedAt = now;
+                entry.Entity.UpdatedAt = now;
+            }
+            else if (entry.State == EntityState.Modified)
+            {
+                entry.Entity.UpdatedAt = now;
+            }
+        }
+    }
+
+    /// <summary>
     /// 配置表名、列名、枚举转换与索引。
     /// </summary>
     /// <param name="modelBuilder">模型构建器</param>
@@ -82,6 +129,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         ConfigureReviewFileView(modelBuilder);
         ConfigureNotification(modelBuilder);
         ConfigureAuditLog(modelBuilder);
+        ConfigureUtcDateTimes(modelBuilder);
     }
 
     /// <summary>
@@ -359,5 +407,41 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(m => m.CreatedAt).HasColumnName("created_at");
             entity.Property(m => m.UpdatedAt).HasColumnName("updated_at");
         });
+    }
+
+    /// <summary>
+    /// 统一 DateTime 列的 UTC 存取转换：写入转 UTC，读回标记为 UTC。
+    /// </summary>
+    /// <param name="modelBuilder">模型构建器</param>
+    private static void ConfigureUtcDateTimes(ModelBuilder modelBuilder)
+    {
+        var utcConverter = new ValueConverter<DateTime, DateTime>(
+            value => value.Kind == DateTimeKind.Utc ? value : value.ToUniversalTime(),
+            value => DateTime.SpecifyKind(value, DateTimeKind.Utc));
+
+        var nullableUtcConverter = new ValueConverter<DateTime?, DateTime?>(
+            value => value.HasValue
+                ? (value.Value.Kind == DateTimeKind.Utc ? value.Value : value.Value.ToUniversalTime())
+                : value,
+            value => value.HasValue ? DateTime.SpecifyKind(value.Value, DateTimeKind.Utc) : value);
+
+        foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+        {
+            foreach (var property in entityType.GetProperties())
+            {
+                if (property.ClrType == typeof(DateTime))
+                {
+                    modelBuilder.Entity(entityType.ClrType)
+                        .Property(property.Name)
+                        .HasConversion(utcConverter);
+                }
+                else if (property.ClrType == typeof(DateTime?))
+                {
+                    modelBuilder.Entity(entityType.ClrType)
+                        .Property(property.Name)
+                        .HasConversion(nullableUtcConverter);
+                }
+            }
+        }
     }
 }

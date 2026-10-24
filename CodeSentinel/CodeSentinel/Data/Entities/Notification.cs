@@ -5,7 +5,7 @@ namespace CodeSentinel.Data.Entities;
 /// <summary>
 /// 站内通知。
 /// </summary>
-public class Notification
+public class Notification : IAuditableEntity
 {
     /// <summary>
     /// 主键。

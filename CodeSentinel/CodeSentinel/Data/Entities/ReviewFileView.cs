@@ -5,7 +5,7 @@ namespace CodeSentinel.Data.Entities;
 /// <summary>
 /// 用户对某个评审文件的“已看过”标记。
 /// </summary>
-public class ReviewFileView
+public class ReviewFileView : IAuditableEntity
 {
     /// <summary>
     /// 主键。
