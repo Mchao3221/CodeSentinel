@@ -111,6 +111,22 @@ internal static class TestApiClient
     }
 
     /// <summary>
+    /// 携带 CSRF 令牌发送 DELETE 请求。
+    /// </summary>
+    /// <param name="client">HTTP 客户端</param>
+    /// <param name="url">请求地址</param>
+    /// <returns>响应</returns>
+    public static async Task<HttpResponseMessage> DeleteWithCsrfAsync(
+        this HttpClient client,
+        string url)
+    {
+        var token = await client.GetCsrfTokenAsync();
+        using var request = new HttpRequestMessage(HttpMethod.Delete, url);
+        request.Headers.Add(CsrfHeaderName, token);
+        return await client.SendAsync(request);
+    }
+
+    /// <summary>
     /// 携带 CSRF 令牌发送 JSON 请求。
     /// </summary>
     /// <param name="client">HTTP 客户端</param>

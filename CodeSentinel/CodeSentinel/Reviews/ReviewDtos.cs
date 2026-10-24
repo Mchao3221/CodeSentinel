@@ -27,6 +27,25 @@ public sealed record CreateReviewRequest(
 public sealed record ReviewRepoRef(Guid Id, string Name);
 
 /// <summary>
+/// 审核人提交结论请求。
+/// </summary>
+/// <param name="State">结论状态，只支持 APPROVED、CHANGES_REQUESTED、PENDING</param>
+/// <param name="Note">结论附言，要求修改时必填</param>
+public sealed record DecideReviewRequest(ReviewerState? State, string? Note);
+
+/// <summary>
+/// 关闭评审单请求。
+/// </summary>
+/// <param name="Reason">关闭原因，可选</param>
+public sealed record CloseReviewRequest(string? Reason);
+
+/// <summary>
+/// 新增审核人请求。
+/// </summary>
+/// <param name="UserIds">待新增的审核人主键列表</param>
+public sealed record AddReviewersRequest(IReadOnlyList<Guid>? UserIds);
+
+/// <summary>
 /// 评审单关联的用户。
 /// </summary>
 /// <param name="Id">用户主键</param>

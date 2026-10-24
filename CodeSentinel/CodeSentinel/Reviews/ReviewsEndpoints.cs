@@ -27,6 +27,126 @@ public static class ReviewsEndpoints
         group.MapGet(string.Empty, ListReviewsAsync);
         group.MapGet("/{id:guid}", GetReviewAsync);
         group.MapPost(string.Empty, CreateReviewAsync);
+        group.MapPost("/{id:guid}/decisions", DecideReviewAsync);
+        group.MapPost("/{id:guid}/close", CloseReviewAsync);
+        group.MapPost("/{id:guid}/reviewers", AddReviewersAsync);
+        group.MapDelete("/{id:guid}/reviewers/{userId:guid}", RemoveReviewerAsync);
+    }
+
+    /// <summary>
+    /// 审核人提交结论，返回更新后的评审单详情。
+    /// </summary>
+    /// <param name="id">评审单主键</param>
+    /// <param name="request">结论请求</param>
+    /// <param name="reviewService">评审单服务</param>
+    /// <param name="httpContext">HTTP 上下文</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>评审单详情</returns>
+    private static async Task<IResult> DecideReviewAsync(
+        Guid id,
+        DecideReviewRequest request,
+        ReviewService reviewService,
+        HttpContext httpContext,
+        CancellationToken ct)
+    {
+        var state = request.State ?? throw new ApiException(
+            StatusCodes.Status400BadRequest,
+            "INVALID_STATE",
+            "state 不能为空");
+        var userId = CurrentUser.RequireId(httpContext);
+
+        await reviewService.DecideAsync(id, userId, state, request.Note, ct);
+        return await BuildDetailResultAsync(
+            reviewService, id, userId, CurrentUser.IsAdmin(httpContext), ct);
+    }
+
+    /// <summary>
+    /// 关闭评审单，返回更新后的评审单详情。
+    /// </summary>
+    /// <param name="id">评审单主键</param>
+    /// <param name="request">关闭请求</param>
+    /// <param name="reviewService">评审单服务</param>
+    /// <param name="httpContext">HTTP 上下文</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>评审单详情</returns>
+    private static async Task<IResult> CloseReviewAsync(
+        Guid id,
+        CloseReviewRequest request,
+        ReviewService reviewService,
+        HttpContext httpContext,
+        CancellationToken ct)
+    {
+        var userId = CurrentUser.RequireId(httpContext);
+
+        await reviewService.CloseAsync(id, userId, request.Reason, ct);
+        return await BuildDetailResultAsync(
+            reviewService, id, userId, CurrentUser.IsAdmin(httpContext), ct);
+    }
+
+    /// <summary>
+    /// 新增审核人，返回更新后的评审单详情。
+    /// </summary>
+    /// <param name="id">评审单主键</param>
+    /// <param name="request">新增审核人请求</param>
+    /// <param name="reviewService">评审单服务</param>
+    /// <param name="httpContext">HTTP 上下文</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>评审单详情</returns>
+    private static async Task<IResult> AddReviewersAsync(
+        Guid id,
+        AddReviewersRequest request,
+        ReviewService reviewService,
+        HttpContext httpContext,
+        CancellationToken ct)
+    {
+        var userId = CurrentUser.RequireId(httpContext);
+
+        await reviewService.AddReviewersAsync(id, userId, request.UserIds ?? [], ct);
+        return await BuildDetailResultAsync(
+            reviewService, id, userId, CurrentUser.IsAdmin(httpContext), ct);
+    }
+
+    /// <summary>
+    /// 移除审核人，返回更新后的评审单详情。
+    /// </summary>
+    /// <param name="id">评审单主键</param>
+    /// <param name="userId">被移除的审核人主键</param>
+    /// <param name="reviewService">评审单服务</param>
+    /// <param name="httpContext">HTTP 上下文</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>评审单详情</returns>
+    private static async Task<IResult> RemoveReviewerAsync(
+        Guid id,
+        Guid userId,
+        ReviewService reviewService,
+        HttpContext httpContext,
+        CancellationToken ct)
+    {
+        var actorId = CurrentUser.RequireId(httpContext);
+
+        await reviewService.RemoveReviewerAsync(id, actorId, userId, ct);
+        return await BuildDetailResultAsync(
+            reviewService, id, actorId, CurrentUser.IsAdmin(httpContext), ct);
+    }
+
+    /// <summary>
+    /// 读取评审单详情并按统一响应返回。
+    /// </summary>
+    /// <param name="reviewService">评审单服务</param>
+    /// <param name="reviewId">评审单主键</param>
+    /// <param name="userId">当前用户主键</param>
+    /// <param name="isAdmin">当前用户是否管理员</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>评审单详情响应</returns>
+    private static async Task<IResult> BuildDetailResultAsync(
+        ReviewService reviewService,
+        Guid reviewId,
+        Guid userId,
+        bool isAdmin,
+        CancellationToken ct)
+    {
+        var detail = await reviewService.GetDetailAsync(reviewId, userId, isAdmin, ct);
+        return Results.Ok(detail);
     }
 
     /// <summary>
