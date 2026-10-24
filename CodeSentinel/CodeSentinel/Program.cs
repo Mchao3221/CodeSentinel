@@ -2,8 +2,10 @@ using CodeSentinel.Audit;
 using CodeSentinel.Auth;
 using CodeSentinel.Common;
 using CodeSentinel.Data;
+using CodeSentinel.Repos;
 using CodeSentinel.Users;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
@@ -11,6 +13,8 @@ using System.Text.Json.Serialization;
 
 const string DefaultConnectionString = "Data Source=data/codesentinel.db";
 const int DefaultSessionHours = 8;
+const string DefaultStorageRoot = "data";
+const string DataProtectionApplicationName = "CodeSentinel";
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -26,6 +30,11 @@ if (sessionHours <= 0)
 builder.Services.AddOpenApi();
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlite(builder.Configuration.GetConnectionString("Default") ?? DefaultConnectionString));
+
+// Data Protection：密钥持久化到 Storage:Root/keys，保证重启后仍能解密仓库凭据
+ConfigureDataProtection(builder);
+
+builder.Services.AddSingleton<CredentialProtector>();
 
 // 全局枚举序列化为 SNAKE_CASE_UPPER
 builder.Services.ConfigureHttpJsonOptions(options =>
@@ -118,6 +127,7 @@ api.MapGet("/health", () => new { status = "ok" });
 api.MapAuthEndpoints(sessionHours);
 api.MapAdminSetupEndpoint();
 api.MapUsersEndpoints();
+api.MapReposEndpoints();
 
 app.Run();
 
@@ -147,6 +157,20 @@ static async Task WriteAuthErrorAsync(HttpContext context, int status, string co
 {
     context.Response.StatusCode = status;
     await context.Response.WriteAsJsonAsync(new { code, message, traceId = context.TraceIdentifier });
+}
+
+// 配置 Data Protection：固定应用名与密钥目录，确保凭据密文跨重启可解
+static void ConfigureDataProtection(WebApplicationBuilder builder)
+{
+    var storageRoot = builder.Configuration.GetValue("Storage:Root", DefaultStorageRoot) ?? DefaultStorageRoot;
+    var storagePath = Path.GetFullPath(storageRoot, builder.Environment.ContentRootPath);
+    var keyPath = Path.Combine(storagePath, "keys");
+    Directory.CreateDirectory(keyPath);
+
+    builder.Services
+        .AddDataProtection()
+        .SetApplicationName(DataProtectionApplicationName)
+        .PersistKeysToFileSystem(new DirectoryInfo(keyPath));
 }
 
 /// <summary>

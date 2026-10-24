@@ -96,6 +96,21 @@ internal static class TestApiClient
     }
 
     /// <summary>
+    /// 携带 CSRF 令牌发送 JSON PUT 请求。
+    /// </summary>
+    /// <param name="client">HTTP 客户端</param>
+    /// <param name="url">请求地址</param>
+    /// <param name="body">请求体</param>
+    /// <returns>响应</returns>
+    public static Task<HttpResponseMessage> PutJsonWithCsrfAsync(
+        this HttpClient client,
+        string url,
+        object body)
+    {
+        return SendJsonWithCsrfAsync(client, HttpMethod.Put, url, body);
+    }
+
+    /// <summary>
     /// 携带 CSRF 令牌发送 JSON 请求。
     /// </summary>
     /// <param name="client">HTTP 客户端</param>
