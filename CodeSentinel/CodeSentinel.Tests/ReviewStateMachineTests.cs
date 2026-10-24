@@ -453,6 +453,275 @@ public class ReviewStateMachineTests
     }
 
     /// <summary>
+    /// 两个审核人并发通过时，合并人与提交人各只收到一条通过通知。
+    /// </summary>
+    [Fact]
+    public async Task Concurrent_approvals_notify_each_recipient_once()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedContextAsync(factory, source);
+        var submitter = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var reviewerA = await factory.LoginAsync(context.ReviewerA.Username, TestPassword);
+        var reviewerB = await factory.LoginAsync(context.ReviewerB.Username, TestPassword);
+        var review = await CreateReviewAsync(
+            submitter, context.Repo.Id, [context.ReviewerA.Id, context.ReviewerB.Id]);
+
+        var responses = await Task.WhenAll(
+            DecideAsync(reviewerA, review.Id, "APPROVED", null),
+            DecideAsync(reviewerB, review.Id, "APPROVED", null));
+
+        Assert.All(responses, m => Assert.Equal(HttpStatusCode.OK, m.StatusCode));
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var stored = await db.Reviews.AsNoTracking().SingleAsync(m => m.Id == review.Id);
+        Assert.Equal(ReviewStatus.Approved, stored.Status);
+
+        var approved = await db.Notifications.AsNoTracking()
+            .Where(m => m.ReviewId == review.Id && m.Type == NotificationType.Approved)
+            .ToListAsync();
+        Assert.Equal(2, approved.Count);
+        Assert.Single(approved, m => m.UserId == context.Merger.Id);
+        Assert.Single(approved, m => m.UserId == context.Submitter.Id);
+    }
+
+    /// <summary>
+    /// 以过期期望状态重试状态迁移时不得再报告变化，避免重复通知。
+    /// </summary>
+    [Fact]
+    public async Task Retried_status_transition_reports_no_change()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedContextAsync(factory, source);
+        var submitter = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var reviewer = await factory.LoginAsync(context.ReviewerA.Username, TestPassword);
+        var review = await CreateReviewAsync(submitter, context.Repo.Id, [context.ReviewerA.Id]);
+        await DecideAsync(reviewer, review.Id, "APPROVED", null);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var service = scope.ServiceProvider.GetRequiredService<ReviewService>();
+            var retried = await service.ApplyStatusAsync(
+                review.Id, ReviewStatus.Open, ReviewStatus.Approved, CancellationToken.None);
+            Assert.Equal(ReviewStatus.Approved, retried.Status);
+            Assert.False(retried.Changed);
+        }
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            await db.Reviews
+                .Where(m => m.Id == review.Id)
+                .ExecuteUpdateAsync(m => m.SetProperty(r => r.Status, ReviewStatus.Open));
+        }
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var service = scope.ServiceProvider.GetRequiredService<ReviewService>();
+            var applied = await service.ApplyStatusAsync(
+                review.Id, ReviewStatus.Open, ReviewStatus.Approved, CancellationToken.None);
+            Assert.Equal(ReviewStatus.Approved, applied.Status);
+            Assert.True(applied.Changed);
+        }
+    }
+
+    /// <summary>
+    /// 两个管理员并发移除仅剩的两名审核人时只有一个成功，另一个返回 400 LAST_REVIEWER。
+    /// </summary>
+    [Fact]
+    public async Task Concurrent_removals_leave_one_active_reviewer()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedContextAsync(factory, source);
+        var submitter = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var review = await CreateReviewAsync(
+            submitter, context.Repo.Id, [context.ReviewerA.Id, context.ReviewerB.Id]);
+        var adminOne = await factory.LoginAsAdminAsync();
+        var adminTwo = await factory.LoginAsAdminAsync();
+
+        var responses = await Task.WhenAll(
+            RemoveReviewerAsync(adminOne, review.Id, context.ReviewerA.Id),
+            RemoveReviewerAsync(adminTwo, review.Id, context.ReviewerB.Id));
+
+        Assert.Single(responses, m => m.StatusCode == HttpStatusCode.OK);
+        var rejected = Assert.Single(
+            responses, m => m.StatusCode == HttpStatusCode.BadRequest);
+        var body = await rejected.Content.ReadFromJsonAsync<ErrorBody>();
+        Assert.NotNull(body);
+        Assert.Equal("LAST_REVIEWER", body.Code);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var activeCount = await db.ReviewReviewers.AsNoTracking()
+            .CountAsync(m => m.ReviewId == review.Id && m.State != ReviewerState.Removed);
+        Assert.Equal(1, activeCount);
+    }
+
+    /// <summary>
+    /// 已被移除的审核人不能再提交结论，条件更新也不会把 Removed 写回。
+    /// </summary>
+    [Fact]
+    public async Task Decision_does_not_revive_removed_reviewer()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedContextAsync(factory, source);
+        var submitter = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var reviewerB = await factory.LoginAsync(context.ReviewerB.Username, TestPassword);
+        var admin = await factory.LoginAsAdminAsync();
+        var review = await CreateReviewAsync(
+            submitter, context.Repo.Id, [context.ReviewerA.Id, context.ReviewerB.Id]);
+
+        var removed = await RemoveReviewerAsync(admin, review.Id, context.ReviewerB.Id);
+        Assert.Equal(HttpStatusCode.OK, removed.StatusCode);
+
+        var decision = await DecideAsync(reviewerB, review.Id, "APPROVED", null);
+        await AssertErrorAsync(decision, HttpStatusCode.Forbidden, "NOT_A_REVIEWER");
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var revisionId = await db.Reviews.AsNoTracking()
+            .Where(m => m.Id == review.Id)
+            .Select(m => m.CurrentRevisionId)
+            .SingleAsync();
+        var service = scope.ServiceProvider.GetRequiredService<ReviewService>();
+        var affected = await service.TryUpdateReviewerDecisionAsync(
+            review.Id,
+            context.ReviewerB.Id,
+            ReviewerState.Approved,
+            null,
+            revisionId ?? Guid.Empty,
+            CancellationToken.None);
+
+        Assert.Equal(0, affected);
+        var stored = await db.ReviewReviewers.AsNoTracking()
+            .SingleAsync(m => m.ReviewId == review.Id && m.UserId == context.ReviewerB.Id);
+        Assert.Equal(ReviewerState.Removed, stored.State);
+        Assert.DoesNotContain(
+            await db.ReviewDecisions.AsNoTracking()
+                .Where(m => m.ReviewId == review.Id && m.UserId == context.ReviewerB.Id)
+                .ToListAsync(),
+            m => m.State == ReviewerState.Approved);
+    }
+
+    /// <summary>
+    /// 终态评审单不再暴露审核人管理入口，增删审核人返回 409。
+    /// </summary>
+    [Fact]
+    public async Task Terminal_review_hides_reviewer_management()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedContextAsync(factory, source);
+        var submitter = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var review = await CreateReviewAsync(submitter, context.Repo.Id, [context.ReviewerA.Id]);
+
+        var closed = await CloseAsync(submitter, review.Id, "结束");
+        Assert.Equal(HttpStatusCode.OK, closed.StatusCode);
+
+        var closedDetail = await submitter.GetFromJsonAsync<ReviewDetailBody>(
+            $"/api/reviews/{review.Id}");
+        Assert.NotNull(closedDetail);
+        Assert.False(closedDetail.Permissions.CanManageReviewers);
+        await AssertErrorAsync(
+            await AddReviewersAsync(submitter, review.Id, [context.ReviewerB.Id]),
+            HttpStatusCode.Conflict,
+            "REVIEW_NOT_ACTIVE");
+        await AssertErrorAsync(
+            await RemoveReviewerAsync(submitter, review.Id, context.ReviewerA.Id),
+            HttpStatusCode.Conflict,
+            "REVIEW_NOT_ACTIVE");
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            await db.Reviews
+                .Where(m => m.Id == review.Id)
+                .ExecuteUpdateAsync(m => m.SetProperty(r => r.Status, ReviewStatus.Merged));
+        }
+
+        var mergedDetail = await submitter.GetFromJsonAsync<ReviewDetailBody>(
+            $"/api/reviews/{review.Id}");
+        Assert.NotNull(mergedDetail);
+        Assert.False(mergedDetail.Permissions.CanManageReviewers);
+        await AssertErrorAsync(
+            await AddReviewersAsync(submitter, review.Id, [context.ReviewerB.Id]),
+            HttpStatusCode.Conflict,
+            "REVIEW_NOT_ACTIVE");
+        await AssertErrorAsync(
+            await RemoveReviewerAsync(submitter, review.Id, context.ReviewerA.Id),
+            HttpStatusCode.Conflict,
+            "REVIEW_NOT_ACTIVE");
+    }
+
+    /// <summary>
+    /// 另一个仓库的成员对评审单的所有写操作都按不存在处理，返回 404。
+    /// </summary>
+    [Fact]
+    public async Task Non_members_get_404_for_reviewer_actions()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedContextAsync(factory, source);
+        var outsider = factory.SeedUser(UniqueName("outsider"), TestPassword);
+        SeedForeignRepoMembership(factory, source.Url, outsider.Id);
+        var submitter = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var review = await CreateReviewAsync(submitter, context.Repo.Id, [context.ReviewerA.Id]);
+        var outsiderClient = await factory.LoginAsync(outsider.Username, TestPassword);
+
+        await AssertErrorAsync(
+            await DecideAsync(outsiderClient, review.Id, "APPROVED", null),
+            HttpStatusCode.NotFound,
+            "NOT_FOUND");
+        await AssertErrorAsync(
+            await CloseAsync(outsiderClient, review.Id, null),
+            HttpStatusCode.NotFound,
+            "NOT_FOUND");
+        await AssertErrorAsync(
+            await AddReviewersAsync(outsiderClient, review.Id, [context.ReviewerB.Id]),
+            HttpStatusCode.NotFound,
+            "NOT_FOUND");
+        await AssertErrorAsync(
+            await RemoveReviewerAsync(outsiderClient, review.Id, context.ReviewerA.Id),
+            HttpStatusCode.NotFound,
+            "NOT_FOUND");
+    }
+
+    /// <summary>
+    /// 同仓库但没有对应角色的成员仍然返回 403。
+    /// </summary>
+    [Fact]
+    public async Task Members_without_role_get_403()
+    {
+        using var factory = new TestAppFactory();
+        using var source = await TestGitRepo.CreateAsync();
+        var context = await SeedContextAsync(factory, source);
+        var submitter = await factory.LoginAsync(context.Submitter.Username, TestPassword);
+        var member = await factory.LoginAsync(context.ReviewerB.Username, TestPassword);
+        var review = await CreateReviewAsync(submitter, context.Repo.Id, [context.ReviewerA.Id]);
+
+        await AssertErrorAsync(
+            await DecideAsync(member, review.Id, "APPROVED", null),
+            HttpStatusCode.Forbidden,
+            "NOT_A_REVIEWER");
+        await AssertErrorAsync(
+            await CloseAsync(member, review.Id, null),
+            HttpStatusCode.Forbidden,
+            "FORBIDDEN");
+        await AssertErrorAsync(
+            await AddReviewersAsync(member, review.Id, [context.ReviewerB.Id]),
+            HttpStatusCode.Forbidden,
+            "FORBIDDEN");
+        await AssertErrorAsync(
+            await RemoveReviewerAsync(member, review.Id, context.ReviewerA.Id),
+            HttpStatusCode.Forbidden,
+            "FORBIDDEN");
+    }
+
+    /// <summary>
     /// 准备仓库、提交人、两名审核人、合并人以及镜像中的 feature 分支。
     /// </summary>
     /// <param name="factory">测试宿主工厂</param>
@@ -523,6 +792,39 @@ public class ReviewStateMachineTests
             IsMerger = isMerger
         });
         db.SaveChanges();
+    }
+
+    /// <summary>
+    /// 把用户加入另一个仓库，用于验证跨仓库访问按不存在处理。
+    /// </summary>
+    /// <param name="factory">测试宿主工厂</param>
+    /// <param name="gitUrl">仓库地址</param>
+    /// <param name="userId">用户主键</param>
+    private static void SeedForeignRepoMembership(
+        TestAppFactory factory,
+        string gitUrl,
+        Guid userId)
+    {
+        var repo = factory.SeedRepo(gitUrl, UniqueName("other-repo"));
+        SeedMember(factory, repo.Id, userId, isMerger: false);
+    }
+
+    /// <summary>
+    /// 断言错误响应状态码与业务错误码。
+    /// </summary>
+    /// <param name="response">HTTP 响应</param>
+    /// <param name="status">期望状态码</param>
+    /// <param name="code">期望业务错误码</param>
+    /// <returns></returns>
+    private static async Task AssertErrorAsync(
+        HttpResponseMessage response,
+        HttpStatusCode status,
+        string code)
+    {
+        var body = await response.Content.ReadFromJsonAsync<ErrorBody>();
+        Assert.Equal(status, response.StatusCode);
+        Assert.NotNull(body);
+        Assert.Equal(code, body.Code);
     }
 
     /// <summary>

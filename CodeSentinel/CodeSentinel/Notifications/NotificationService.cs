@@ -63,17 +63,34 @@ public sealed class NotificationService
     /// <returns></returns>
     public async Task NotifyReviewersAsync(Guid reviewId, NotificationType type, CancellationToken ct)
     {
-        var context = await LoadReviewContextAsync(reviewId, ct);
-        if (context is null)
-        {
-            return;
-        }
-
         var reviewerIds = await _db.ReviewReviewers.AsNoTracking()
             .Where(m => m.ReviewId == reviewId && m.State != ReviewerState.Removed)
             .Select(m => m.UserId)
             .Distinct()
             .ToListAsync(ct);
+
+        await NotifyUsersAsync(reviewId, reviewerIds, type, ct);
+    }
+
+    /// <summary>
+    /// 给去重后的接收人各发一条通知，评审单不存在时忽略。
+    /// </summary>
+    /// <param name="reviewId">评审单主键</param>
+    /// <param name="userIds">接收人主键</param>
+    /// <param name="type">通知类型</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns></returns>
+    public async Task NotifyUsersAsync(
+        Guid reviewId,
+        IReadOnlyCollection<Guid> userIds,
+        NotificationType type,
+        CancellationToken ct)
+    {
+        var context = await LoadReviewContextAsync(reviewId, ct);
+        if (context is null)
+        {
+            return;
+        }
 
         var payload = new
         {
@@ -85,9 +102,15 @@ public sealed class NotificationService
             baseBranch = context.BaseBranch
         };
 
-        foreach (var reviewerId in reviewerIds)
+        var sent = new HashSet<Guid>();
+        foreach (var userId in userIds)
         {
-            await CreateAsync(reviewerId, type, reviewId, payload, ct);
+            if (!sent.Add(userId))
+            {
+                continue;
+            }
+
+            await CreateAsync(userId, type, reviewId, payload, ct);
         }
     }
 

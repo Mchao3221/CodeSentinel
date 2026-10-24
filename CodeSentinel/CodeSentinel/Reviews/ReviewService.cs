@@ -16,7 +16,8 @@ public sealed class ReviewService(
     AppDbContext db,
     MirrorService mirrorService,
     AuditService auditService,
-    NotificationService notificationService)
+    NotificationService notificationService,
+    ReviewReviewerService reviewerService)
 {
     /// <summary>
     /// 创建评审单审计动作。
@@ -32,16 +33,6 @@ public sealed class ReviewService(
     /// 关闭评审单审计动作。
     /// </summary>
     public const string ReviewClosedAction = "REVIEW_CLOSED";
-
-    /// <summary>
-    /// 新增审核人审计动作。
-    /// </summary>
-    public const string ReviewersAddedAction = "REVIEWERS_ADDED";
-
-    /// <summary>
-    /// 移除审核人审计动作。
-    /// </summary>
-    public const string ReviewerRemovedAction = "REVIEWER_REMOVED";
 
     private const string ReviewTargetType = "REVIEW";
     private const int MaxTitleLength = 200;
@@ -130,19 +121,27 @@ public sealed class ReviewService(
         CancellationToken ct)
     {
         EnsureValidDecisionState(state);
-        var review = await LoadReviewAsync(reviewId, ct);
-        EnsureReviewActive(review.Status);
-        var reviewer = await LoadAssignedReviewerAsync(reviewId, userId, ct);
+        var review = await ReviewAccess.LoadForMemberAsync(db, reviewId, userId, ct);
+        ReviewAccess.EnsureActive(review.Status);
+        await EnsureAssignedReviewerAsync(reviewId, userId, ct);
         EnsureNotSubmitter(review, userId);
         var normalizedNote = NormalizeNote(state, note);
+        var revisionId = review.CurrentRevisionId ?? Guid.Empty;
 
-        ApplyDecision(review, reviewer, userId, state, normalizedNote);
+        var affected = await TryUpdateReviewerDecisionAsync(
+            reviewId, userId, state, normalizedNote, revisionId, ct);
+        if (affected == 0)
+        {
+            throw NotAReviewer();
+        }
+
+        AddDecisionHistory(review, userId, state, normalizedNote, revisionId);
         await db.SaveChangesAsync(ct);
 
         var next = ReviewStateMachine.Recompute(
             await LoadActiveReviewerStatesAsync(reviewId, ct));
-        var finalStatus = await ApplyStatusAsync(reviewId, review.Status, next, ct);
-        await NotifyDecisionAsync(review, review.Status, finalStatus, state, ct);
+        var (finalStatus, changed) = await ApplyStatusAsync(reviewId, review.Status, next, ct);
+        await NotifyDecisionAsync(review, changed, finalStatus, state, ct);
     }
 
     /// <summary>
@@ -159,8 +158,8 @@ public sealed class ReviewService(
         string? reason,
         CancellationToken ct)
     {
-        var review = await LoadReviewAsync(reviewId, ct);
-        EnsureReviewActive(review.Status);
+        var review = await ReviewAccess.LoadForMemberAsync(db, reviewId, userId, ct);
+        ReviewAccess.EnsureActive(review.Status);
         await EnsureCanCloseAsync(review, userId, ct);
         var normalizedReason = NormalizeCloseReason(reason);
         var now = DateTime.UtcNow;
@@ -180,11 +179,11 @@ public sealed class ReviewService(
 
         var recipients = await LoadActiveReviewerIdsAsync(reviewId, ct);
         recipients.Add(review.SubmitterId);
-        await NotifyUsersAsync(reviewId, recipients, NotificationType.Closed, ct);
+        await notificationService.NotifyUsersAsync(reviewId, recipients, NotificationType.Closed, ct);
     }
 
     /// <summary>
-    /// 新增审核人：提交人或管理员可用；只接受启用中的非提交人仓库成员，已存在的人忽略。
+    /// 新增审核人：委托审核人服务写入，随后按最新审核人结论重算评审单状态。
     /// </summary>
     /// <param name="reviewId">评审单主键</param>
     /// <param name="actorId">操作人主键</param>
@@ -197,38 +196,15 @@ public sealed class ReviewService(
         IReadOnlyList<Guid> userIds,
         CancellationToken ct)
     {
-        var review = await LoadReviewAsync(reviewId, ct);
-        EnsureReviewActive(review.Status);
-        await EnsureCanManageReviewersAsync(review, actorId, ct);
-        var candidates = await ResolveNewReviewersAsync(review, userIds, ct);
-
-        foreach (var userId in candidates)
-        {
-            db.ReviewReviewers.Add(new ReviewReviewer
-            {
-                Id = Guid.NewGuid(),
-                ReviewId = reviewId,
-                UserId = userId,
-                State = ReviewerState.Pending,
-                StateRevisionId = review.CurrentRevisionId
-            });
-        }
-
-        auditService.Add(
-            actorId,
-            ReviewersAddedAction,
-            ReviewTargetType,
-            reviewId,
-            new { userIds = candidates });
-        await db.SaveChangesAsync(ct);
+        var expectedStatus = await reviewerService.AddAsync(reviewId, actorId, userIds, ct);
 
         var next = ReviewStateMachine.Recompute(
             await LoadActiveReviewerStatesAsync(reviewId, ct));
-        await ApplyStatusAsync(reviewId, review.Status, next, ct);
+        await ApplyStatusAsync(reviewId, expectedStatus, next, ct);
     }
 
     /// <summary>
-    /// 移除审核人：置为 Removed 保留历史；提交人只能移除待审人，管理员可移除任何人。
+    /// 移除审核人：委托审核人服务软删除，必要时重算评审单状态并通知提交人。
     /// </summary>
     /// <param name="reviewId">评审单主键</param>
     /// <param name="actorId">操作人主键</param>
@@ -241,33 +217,17 @@ public sealed class ReviewService(
         Guid userId,
         CancellationToken ct)
     {
-        var review = await LoadReviewAsync(reviewId, ct);
-        EnsureReviewActive(review.Status);
-        var target = await LoadReviewerAsync(reviewId, userId, ct);
-        var isAdmin = await IsAdminUserAsync(actorId, ct);
-        EnsureCanRemoveReviewer(review, target, actorId, isAdmin);
-        await EnsureNotLastReviewerAsync(reviewId, userId, ct);
+        var result = await reviewerService.RemoveAsync(reviewId, actorId, userId, ct);
 
-        var shouldRecompute = target.State is ReviewerState.Approved
-            or ReviewerState.ChangesRequested;
-        target.State = ReviewerState.Removed;
-        auditService.Add(
-            actorId,
-            ReviewerRemovedAction,
-            ReviewTargetType,
-            reviewId,
-            new { userId });
-        await db.SaveChangesAsync(ct);
-
-        if (shouldRecompute)
+        if (result.ShouldRecompute)
         {
             var next = ReviewStateMachine.Recompute(
                 await LoadActiveReviewerStatesAsync(reviewId, ct));
-            await ApplyStatusAsync(reviewId, review.Status, next, ct);
+            await ApplyStatusAsync(reviewId, result.ExpectedStatus, next, ct);
         }
 
-        await NotifyUsersAsync(
-            reviewId, [review.SubmitterId], NotificationType.ReviewerRemoved, ct);
+        await notificationService.NotifyUsersAsync(
+            reviewId, [result.SubmitterId], NotificationType.ReviewerRemoved, ct);
     }
 
     /// <summary>
@@ -300,29 +260,38 @@ public sealed class ReviewService(
     }
 
     /// <summary>
-    /// 读取当前用户在该评审单上的审核人记录，未分配或已移除时返回 403。
+    /// 校验当前用户是该评审单上未移除的审核人，否则返回 403。
     /// </summary>
     /// <param name="reviewId">评审单主键</param>
     /// <param name="userId">用户主键</param>
     /// <param name="ct">取消令牌</param>
-    /// <returns>审核人记录</returns>
-    private async Task<ReviewReviewer> LoadAssignedReviewerAsync(
+    /// <returns></returns>
+    private async Task EnsureAssignedReviewerAsync(
         Guid reviewId,
         Guid userId,
         CancellationToken ct)
     {
-        var reviewer = await db.ReviewReviewers
-            .FirstOrDefaultAsync(m => m.ReviewId == reviewId && m.UserId == userId, ct);
+        var assigned = await db.ReviewReviewers.AsNoTracking()
+            .AnyAsync(m => m.ReviewId == reviewId
+                && m.UserId == userId
+                && m.State != ReviewerState.Removed, ct);
 
-        if (reviewer is null || reviewer.State == ReviewerState.Removed)
+        if (!assigned)
         {
-            throw new ApiException(
-                StatusCodes.Status403Forbidden,
-                "NOT_A_REVIEWER",
-                "只有被分配的审核人可以给出结论");
+            throw NotAReviewer();
         }
+    }
 
-        return reviewer;
+    /// <summary>
+    /// 构造“不是被分配的审核人”异常。
+    /// </summary>
+    /// <returns>业务异常</returns>
+    private static ApiException NotAReviewer()
+    {
+        return new ApiException(
+            StatusCodes.Status403Forbidden,
+            "NOT_A_REVIEWER",
+            "只有被分配的审核人可以给出结论");
     }
 
     /// <summary>
@@ -372,24 +341,50 @@ public sealed class ReviewService(
     }
 
     /// <summary>
-    /// 把本次结论写入审核人当前状态并追加一条结论历史与审计。
+    /// 用带“未移除”谓词的条件更新写入审核人结论，避免把并发移除的行复活。
     /// </summary>
-    /// <param name="review">评审单</param>
-    /// <param name="reviewer">审核人记录</param>
+    /// <param name="reviewId">评审单主键</param>
     /// <param name="userId">用户主键</param>
     /// <param name="state">结论状态</param>
     /// <param name="note">归一化后的附言</param>
-    private void ApplyDecision(
-        Review review,
-        ReviewReviewer reviewer,
+    /// <param name="revisionId">结论对应的评审版本</param>
+    /// <param name="ct">取消令牌</param>
+    /// <returns>受影响行数，0 表示审核人已被移除</returns>
+    internal async Task<int> TryUpdateReviewerDecisionAsync(
+        Guid reviewId,
         Guid userId,
         ReviewerState state,
-        string? note)
+        string? note,
+        Guid revisionId,
+        CancellationToken ct)
     {
-        var revisionId = review.CurrentRevisionId ?? Guid.Empty;
-        reviewer.State = state;
-        reviewer.Note = note;
-        reviewer.StateRevisionId = revisionId;
+        var now = DateTime.UtcNow;
+        return await db.ReviewReviewers
+            .Where(m => m.ReviewId == reviewId
+                && m.UserId == userId
+                && m.State != ReviewerState.Removed)
+            .ExecuteUpdateAsync(m => m
+                .SetProperty(r => r.State, state)
+                .SetProperty(r => r.Note, note)
+                .SetProperty(r => r.StateRevisionId, revisionId)
+                .SetProperty(r => r.UpdatedAt, now), ct);
+    }
+
+    /// <summary>
+    /// 追加一条结论历史与审计，由调用方统一保存。
+    /// </summary>
+    /// <param name="review">评审单</param>
+    /// <param name="userId">用户主键</param>
+    /// <param name="state">结论状态</param>
+    /// <param name="note">归一化后的附言</param>
+    /// <param name="revisionId">结论对应的评审版本</param>
+    private void AddDecisionHistory(
+        Review review,
+        Guid userId,
+        ReviewerState state,
+        string? note,
+        Guid revisionId)
+    {
         db.ReviewDecisions.Add(new ReviewDecision
         {
             Id = Guid.NewGuid(),
@@ -443,13 +438,14 @@ public sealed class ReviewService(
 
     /// <summary>
     /// 乐观更新评审单状态：仅当当前状态等于期望值时更新，冲突时重算并重试一次。
+    /// 返回值中的 Changed 表示本次请求是否真正完成了状态迁移，用于避免重复通知。
     /// </summary>
     /// <param name="reviewId">评审单主键</param>
     /// <param name="expected">期望的当前状态</param>
     /// <param name="next">目标状态</param>
     /// <param name="ct">取消令牌</param>
-    /// <returns>最终生效的状态</returns>
-    private async Task<ReviewStatus> ApplyStatusAsync(
+    /// <returns>最终生效的状态，以及是否由本次请求完成迁移</returns>
+    internal async Task<(ReviewStatus Status, bool Changed)> ApplyStatusAsync(
         Guid reviewId,
         ReviewStatus expected,
         ReviewStatus next,
@@ -457,26 +453,27 @@ public sealed class ReviewService(
     {
         if (next == expected)
         {
-            return expected;
+            return (expected, false);
         }
 
         var now = DateTime.UtcNow;
         if (await TryUpdateStatusAsync(reviewId, expected, next, now, ct))
         {
-            return next;
+            return (next, true);
         }
 
         var latest = await LoadReviewAsync(reviewId, ct);
-        EnsureReviewActive(latest.Status);
+        ReviewAccess.EnsureActive(latest.Status);
         var retryNext = ReviewStateMachine.Recompute(
             await LoadActiveReviewerStatesAsync(reviewId, ct));
+        var changed = retryNext != latest.Status;
 
-        if (!await TryUpdateStatusAsync(reviewId, latest.Status, retryNext, now, ct))
+        if (changed && !await TryUpdateStatusAsync(reviewId, latest.Status, retryNext, now, ct))
         {
             throw ConcurrentUpdate();
         }
 
-        return retryNext;
+        return (retryNext, changed);
     }
 
     /// <summary>
@@ -521,7 +518,7 @@ public sealed class ReviewService(
         CancellationToken ct)
     {
         var latest = await LoadReviewAsync(reviewId, ct);
-        EnsureReviewActive(latest.Status);
+        ReviewAccess.EnsureActive(latest.Status);
 
         if (!await TryCloseAsync(reviewId, latest.Status, reason, now, ct))
         {
@@ -557,22 +554,22 @@ public sealed class ReviewService(
     }
 
     /// <summary>
-    /// 状态变化时按结论类型通知：通过通知合并人与提交人，要求修改或撤回通知提交人。
+    /// 状态迁移由本次请求完成时按结论类型通知：通过通知合并人与提交人，要求修改或撤回通知提交人。
     /// </summary>
     /// <param name="review">评审单</param>
-    /// <param name="previousStatus">操作前状态</param>
+    /// <param name="changed">本次请求是否真正完成状态迁移</param>
     /// <param name="finalStatus">操作后状态</param>
     /// <param name="state">本次结论</param>
     /// <param name="ct">取消令牌</param>
     /// <returns></returns>
     private async Task NotifyDecisionAsync(
         Review review,
-        ReviewStatus previousStatus,
+        bool changed,
         ReviewStatus finalStatus,
         ReviewerState state,
         CancellationToken ct)
     {
-        if (finalStatus == previousStatus)
+        if (!changed)
         {
             return;
         }
@@ -581,7 +578,8 @@ public sealed class ReviewService(
         {
             var recipients = await LoadMergerIdsAsync(review.RepoId, ct);
             recipients.Add(review.SubmitterId);
-            await NotifyUsersAsync(review.Id, recipients, NotificationType.Approved, ct);
+            await notificationService.NotifyUsersAsync(
+                review.Id, recipients, NotificationType.Approved, ct);
             return;
         }
 
@@ -594,7 +592,8 @@ public sealed class ReviewService(
         var type = finalStatus == ReviewStatus.ChangesRequested
             ? NotificationType.ChangesRequested
             : NotificationType.ReviewSubmitted;
-        await NotifyUsersAsync(review.Id, [review.SubmitterId], type, ct);
+        await notificationService.NotifyUsersAsync(
+            review.Id, [review.SubmitterId], type, ct);
     }
 
     /// <summary>
@@ -609,59 +608,6 @@ public sealed class ReviewService(
             .Where(m => m.RepoId == repoId && m.IsMerger)
             .Select(m => m.UserId)
             .ToListAsync(ct);
-    }
-
-    /// <summary>
-    /// 给去重后的接收人各写一条通知。
-    /// </summary>
-    /// <param name="reviewId">评审单主键</param>
-    /// <param name="userIds">接收人主键</param>
-    /// <param name="type">通知类型</param>
-    /// <param name="ct">取消令牌</param>
-    /// <returns></returns>
-    private async Task NotifyUsersAsync(
-        Guid reviewId,
-        IReadOnlyCollection<Guid> userIds,
-        NotificationType type,
-        CancellationToken ct)
-    {
-        var payload = await LoadNotificationPayloadAsync(reviewId, ct);
-        var sent = new HashSet<Guid>();
-
-        foreach (var userId in userIds)
-        {
-            if (!sent.Add(userId))
-            {
-                continue;
-            }
-
-            await notificationService.CreateAsync(userId, type, reviewId, payload, ct);
-        }
-    }
-
-    /// <summary>
-    /// 读取通知 payload 所需的评审单、仓库与提交人信息。
-    /// </summary>
-    /// <param name="reviewId">评审单主键</param>
-    /// <param name="ct">取消令牌</param>
-    /// <returns>通知 payload</returns>
-    private async Task<NotificationPayload> LoadNotificationPayloadAsync(
-        Guid reviewId,
-        CancellationToken ct)
-    {
-        return await (
-            from review in db.Reviews.AsNoTracking()
-            join repo in db.Repos.AsNoTracking() on review.RepoId equals repo.Id
-            join submitter in db.Users.AsNoTracking() on review.SubmitterId equals submitter.Id
-            where review.Id == reviewId
-            select new NotificationPayload(
-                review.Id,
-                review.Title,
-                repo.Name,
-                submitter.DisplayName,
-                review.HeadBranch,
-                review.BaseBranch))
-            .FirstAsync(ct);
     }
 
     /// <summary>
@@ -683,29 +629,6 @@ public sealed class ReviewService(
                 StatusCodes.Status403Forbidden,
                 "FORBIDDEN",
                 "无权关闭该评审单");
-        }
-    }
-
-    /// <summary>
-    /// 校验当前用户可以管理审核人：提交人或管理员。
-    /// </summary>
-    /// <param name="review">评审单</param>
-    /// <param name="userId">用户主键</param>
-    /// <param name="ct">取消令牌</param>
-    /// <returns></returns>
-    private async Task EnsureCanManageReviewersAsync(
-        Review review,
-        Guid userId,
-        CancellationToken ct)
-    {
-        var allowed = review.SubmitterId == userId || await IsAdminUserAsync(userId, ct);
-
-        if (!allowed)
-        {
-            throw new ApiException(
-                StatusCodes.Status403Forbidden,
-                "FORBIDDEN",
-                "无权管理审核人");
         }
     }
 
@@ -740,162 +663,6 @@ public sealed class ReviewService(
         }
 
         return normalized;
-    }
-
-    /// <summary>
-    /// 解析待新增的审核人：去重、排除已存在的人、校验非提交人与启用中的仓库成员。
-    /// </summary>
-    /// <param name="review">评审单</param>
-    /// <param name="userIds">请求中的审核人主键</param>
-    /// <param name="ct">取消令牌</param>
-    /// <returns>实际新增的审核人主键</returns>
-    private async Task<List<Guid>> ResolveNewReviewersAsync(
-        Review review,
-        IReadOnlyList<Guid>? userIds,
-        CancellationToken ct)
-    {
-        var requested = userIds?
-            .Where(m => m != Guid.Empty)
-            .Distinct()
-            .ToList() ?? [];
-
-        if (requested.Count == 0)
-        {
-            throw InvalidReviewer("至少需要一名审核人");
-        }
-
-        if (requested.Contains(review.SubmitterId))
-        {
-            throw InvalidReviewer("提交人不能作为评审人");
-        }
-
-        var existing = await db.ReviewReviewers.AsNoTracking()
-            .Where(m => m.ReviewId == review.Id && requested.Contains(m.UserId))
-            .Select(m => m.UserId)
-            .ToListAsync(ct);
-        var candidates = requested.Except(existing).ToList();
-
-        if (candidates.Count == 0)
-        {
-            throw InvalidReviewer("没有可新增的审核人");
-        }
-
-        var memberCount = await db.RepoMembers.AsNoTracking()
-            .Where(m => m.RepoId == review.RepoId
-                && candidates.Contains(m.UserId)
-                && db.Users.Any(user => user.Id == m.UserId && user.IsActive))
-            .CountAsync(ct);
-
-        if (memberCount != candidates.Count)
-        {
-            throw InvalidReviewer("审核人必须是启用中的仓库成员");
-        }
-
-        return candidates;
-    }
-
-    /// <summary>
-    /// 读取审核人记录，不存在或已移除时返回 404。
-    /// </summary>
-    /// <param name="reviewId">评审单主键</param>
-    /// <param name="userId">审核人主键</param>
-    /// <param name="ct">取消令牌</param>
-    /// <returns>审核人记录</returns>
-    private async Task<ReviewReviewer> LoadReviewerAsync(
-        Guid reviewId,
-        Guid userId,
-        CancellationToken ct)
-    {
-        var reviewer = await db.ReviewReviewers
-            .FirstOrDefaultAsync(m => m.ReviewId == reviewId && m.UserId == userId, ct);
-
-        if (reviewer is null || reviewer.State == ReviewerState.Removed)
-        {
-            throw new ApiException(
-                StatusCodes.Status404NotFound,
-                "NOT_FOUND",
-                "审核人不在评审单上");
-        }
-
-        return reviewer;
-    }
-
-    /// <summary>
-    /// 校验操作人可以移除目标审核人：管理员可移除任何人，提交人只能移除待审人。
-    /// </summary>
-    /// <param name="review">评审单</param>
-    /// <param name="target">目标审核人</param>
-    /// <param name="actorId">操作人主键</param>
-    /// <param name="isAdmin">操作人是否管理员</param>
-    private static void EnsureCanRemoveReviewer(
-        Review review,
-        ReviewReviewer target,
-        Guid actorId,
-        bool isAdmin)
-    {
-        if (isAdmin)
-        {
-            return;
-        }
-
-        if (review.SubmitterId != actorId)
-        {
-            throw new ApiException(
-                StatusCodes.Status403Forbidden,
-                "FORBIDDEN",
-                "无权管理审核人");
-        }
-
-        if (target.State != ReviewerState.Pending)
-        {
-            throw new ApiException(
-                StatusCodes.Status403Forbidden,
-                "CANNOT_REMOVE_DECIDED",
-                "只能移除尚未给出结论的审核人");
-        }
-    }
-
-    /// <summary>
-    /// 保证移除后仍有至少一名非 Removed 的审核人。
-    /// </summary>
-    /// <param name="reviewId">评审单主键</param>
-    /// <param name="userId">被移除的审核人主键</param>
-    /// <param name="ct">取消令牌</param>
-    /// <returns></returns>
-    private async Task EnsureNotLastReviewerAsync(
-        Guid reviewId,
-        Guid userId,
-        CancellationToken ct)
-    {
-        var remaining = await db.ReviewReviewers.AsNoTracking()
-            .CountAsync(m => m.ReviewId == reviewId
-                && m.UserId != userId
-                && m.State != ReviewerState.Removed, ct);
-
-        if (remaining == 0)
-        {
-            throw new ApiException(
-                StatusCodes.Status400BadRequest,
-                "LAST_REVIEWER",
-                "评审单至少需要一名审核人");
-        }
-    }
-
-    /// <summary>
-    /// 校验评审单处于允许操作的状态。
-    /// </summary>
-    /// <param name="status">评审单状态</param>
-    private static void EnsureReviewActive(ReviewStatus status)
-    {
-        if (status is not (ReviewStatus.Open
-            or ReviewStatus.ChangesRequested
-            or ReviewStatus.Approved))
-        {
-            throw new ApiException(
-                StatusCodes.Status409Conflict,
-                "REVIEW_NOT_ACTIVE",
-                "评审单当前状态不允许该操作");
-        }
     }
 
     /// <summary>
@@ -1241,10 +1008,11 @@ public sealed class ReviewService(
         var canDecide = active
             && assignment is not null
             && assignment.StateRevisionId == review.CurrentRevisionId;
+        var canManageReviewers = active && (review.SubmitterId == userId || isAdmin);
 
         return new ReviewPermissionsDto(
             canDecide,
-            review.SubmitterId == userId || isAdmin,
+            canManageReviewers,
             review.SubmitterId == userId || isMerger || isAdmin,
             review.Status == ReviewStatus.Approved && (isMerger || isAdmin));
     }
@@ -1408,23 +1176,6 @@ public sealed class ReviewService(
         ReviewerState State,
         Guid? StateRevisionId,
         string? Note);
-
-    /// <summary>
-    /// 通知 payload：渲染所需的评审单最小字段。
-    /// </summary>
-    /// <param name="ReviewId">评审单主键</param>
-    /// <param name="Title">标题</param>
-    /// <param name="RepoName">仓库名称</param>
-    /// <param name="SubmitterName">提交人显示名</param>
-    /// <param name="HeadBranch">提交分支</param>
-    /// <param name="BaseBranch">目标分支</param>
-    private sealed record NotificationPayload(
-        Guid ReviewId,
-        string Title,
-        string RepoName,
-        string SubmitterName,
-        string HeadBranch,
-        string BaseBranch);
 }
 
 /// <summary>
