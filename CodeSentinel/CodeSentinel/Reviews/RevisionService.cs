@@ -332,11 +332,8 @@ public sealed class RevisionService(
             headSha = newHeadSha
         };
 
-        foreach (var userId in reviewerIds)
-        {
-            await notificationService.CreateAsync(
-                userId, NotificationType.NewCommits, snapshot.ReviewId, payload, ct);
-        }
+        await notificationService.CreateForUsersAsync(
+            snapshot.ReviewId, reviewerIds, NotificationType.NewCommits, payload, ct);
     }
 
     /// <summary>

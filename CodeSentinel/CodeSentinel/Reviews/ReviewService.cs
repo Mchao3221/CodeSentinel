@@ -141,7 +141,7 @@ public sealed class ReviewService(
         var next = ReviewStateMachine.Recompute(
             await LoadActiveReviewerStatesAsync(reviewId, ct));
         var (finalStatus, changed) = await ApplyStatusAsync(reviewId, review.Status, next, ct);
-        await NotifyDecisionAsync(review, changed, finalStatus, state, ct);
+        await NotifyDecisionAsync(review, changed, finalStatus, state, userId, ct);
     }
 
     /// <summary>
@@ -204,7 +204,7 @@ public sealed class ReviewService(
     }
 
     /// <summary>
-    /// 移除审核人：委托审核人服务软删除，必要时重算评审单状态并通知提交人。
+    /// 移除审核人：委托审核人服务软删除，必要时重算评审单状态；非提交人操作时通知提交人。
     /// </summary>
     /// <param name="reviewId">评审单主键</param>
     /// <param name="actorId">操作人主键</param>
@@ -226,8 +226,14 @@ public sealed class ReviewService(
             await ApplyStatusAsync(reviewId, result.ExpectedStatus, next, ct);
         }
 
-        await notificationService.NotifyUsersAsync(
-            reviewId, [result.SubmitterId], NotificationType.ReviewerRemoved, ct);
+        // 提交人自己移除审核人时不通知自己，管理员代为移除时才提醒提交人补人
+        if (actorId == result.SubmitterId)
+        {
+            return;
+        }
+
+        await notificationService.NotifyReviewerRemovedAsync(
+            reviewId, result.SubmitterId, userId, "REMOVED_BY_ADMIN", ct);
     }
 
     /// <summary>
@@ -554,12 +560,13 @@ public sealed class ReviewService(
     }
 
     /// <summary>
-    /// 状态迁移由本次请求完成时按结论类型通知：通过通知合并人与提交人，要求修改或撤回通知提交人。
+    /// 状态迁移由本次请求完成时按结论类型通知：通过通知合并人与提交人，要求修改通知提交人，撤回通知提交人。
     /// </summary>
     /// <param name="review">评审单</param>
     /// <param name="changed">本次请求是否真正完成状态迁移</param>
     /// <param name="finalStatus">操作后状态</param>
     /// <param name="state">本次结论</param>
+    /// <param name="actorId">提交结论的审核人主键</param>
     /// <param name="ct">取消令牌</param>
     /// <returns></returns>
     private async Task NotifyDecisionAsync(
@@ -567,6 +574,7 @@ public sealed class ReviewService(
         bool changed,
         ReviewStatus finalStatus,
         ReviewerState state,
+        Guid actorId,
         CancellationToken ct)
     {
         if (!changed)
@@ -583,17 +591,21 @@ public sealed class ReviewService(
             return;
         }
 
-        // 只有“要求修改”或“撤回”改变状态时才通知提交人
-        if (finalStatus != ReviewStatus.ChangesRequested && state != ReviewerState.Pending)
+        if (finalStatus == ReviewStatus.ChangesRequested)
+        {
+            await notificationService.NotifyUsersAsync(
+                review.Id, [review.SubmitterId], NotificationType.ChangesRequested, ct);
+            return;
+        }
+
+        // 剩余分支是“撤回”：只有撤回让状态回退时才通知提交人
+        if (state != ReviewerState.Pending)
         {
             return;
         }
 
-        var type = finalStatus == ReviewStatus.ChangesRequested
-            ? NotificationType.ChangesRequested
-            : NotificationType.ReviewSubmitted;
-        await notificationService.NotifyUsersAsync(
-            review.Id, [review.SubmitterId], type, ct);
+        await notificationService.NotifyDecisionWithdrawnAsync(
+            review.Id, review.SubmitterId, actorId, ct);
     }
 
     /// <summary>

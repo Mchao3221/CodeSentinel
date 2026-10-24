@@ -167,6 +167,7 @@ api.MapCommentsEndpoints();
 api.MapDiffEndpoints();
 api.MapViewedEndpoints();
 api.MapSyncEndpoints();
+api.MapNotificationsEndpoints();
 
 app.Run();
 

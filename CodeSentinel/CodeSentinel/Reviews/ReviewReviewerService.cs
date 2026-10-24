@@ -2,16 +2,21 @@ using CodeSentinel.Audit;
 using CodeSentinel.Common;
 using CodeSentinel.Data;
 using CodeSentinel.Data.Entities;
+using CodeSentinel.Notifications;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSentinel.Reviews;
 
 /// <summary>
-/// 评审单审核人服务：新增与移除审核人，维护软删除、审计与并发保护。
+/// 评审单审核人服务：新增与移除审核人，维护软删除、审计、通知与并发保护。
 /// </summary>
 /// <param name="db">数据库上下文</param>
 /// <param name="auditService">审计服务</param>
-public sealed class ReviewReviewerService(AppDbContext db, AuditService auditService)
+/// <param name="notificationService">通知服务</param>
+public sealed class ReviewReviewerService(
+    AppDbContext db,
+    AuditService auditService,
+    NotificationService notificationService)
 {
     /// <summary>
     /// 新增审核人审计动作。
@@ -63,6 +68,10 @@ public sealed class ReviewReviewerService(AppDbContext db, AuditService auditSer
             reviewId,
             new { userIds = candidates });
         await db.SaveChangesAsync(ct);
+
+        // 新加入的审核人按创建评审单的同一形状收到待评审通知，五分钟内重复加入由通知服务去重
+        await notificationService.NotifyUsersAsync(
+            reviewId, candidates, NotificationType.ReviewSubmitted, ct);
 
         return review.Status;
     }

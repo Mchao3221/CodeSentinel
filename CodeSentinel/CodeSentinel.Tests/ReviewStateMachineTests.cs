@@ -131,7 +131,7 @@ public class ReviewStateMachineTests
             .ToListAsync();
         Assert.Equal(2, notifications.Count);
         Assert.Contains(notifications, m => m.Type == NotificationType.Approved);
-        Assert.Single(notifications, m => m.Type == NotificationType.ReviewSubmitted);
+        Assert.Single(notifications, m => m.Type == NotificationType.DecisionWithdrawn);
     }
 
     /// <summary>
@@ -345,7 +345,9 @@ public class ReviewStateMachineTests
                 && m.UserId == context.Submitter.Id
                 && m.Type == NotificationType.ReviewerRemoved)
             .ToListAsync();
-        Assert.Single(notified);
+
+        // 提交人自己移除审核人时不通知自己
+        Assert.Empty(notified);
     }
 
     /// <summary>

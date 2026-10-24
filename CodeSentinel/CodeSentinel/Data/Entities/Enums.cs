@@ -152,7 +152,12 @@ public enum NotificationType
     /// <summary>
     /// 评审单上的审核人被移出，需要提交人补人。
     /// </summary>
-    ReviewerRemoved
+    ReviewerRemoved,
+
+    /// <summary>
+    /// 审核人撤回了此前给出的结论。
+    /// </summary>
+    DecisionWithdrawn
 }
 
 /// <summary>
